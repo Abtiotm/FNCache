@@ -153,6 +153,44 @@ func (w *ControlWriter) Publish(ctx context.Context, generation, heartbeatNS, he
 	return nil
 }
 
+// RefreshHeartbeat updates only the monotonic heartbeat of an already
+// enabled control Map. It never enables the fast path or changes generation
+// ownership fields.
+func (w *ControlWriter) RefreshHeartbeat(ctx context.Context, heartbeatNS uint64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if heartbeatNS == 0 {
+		return fmt.Errorf("heartbeat value must be non-zero")
+	}
+	path := filepath.Join(w.pinRoot, "maps", "control_map")
+	control, err := w.open(path)
+	if err != nil {
+		return fmt.Errorf("open control Map: %w", err)
+	}
+	defer func() { _ = control.Close() }()
+
+	key := uint32(0)
+	var value ControlV1
+	if err := control.Lookup(key, &value); err != nil {
+		return fmt.Errorf("read control Map: %w", err)
+	}
+	if err := validateControlValue(value); err != nil {
+		return err
+	}
+	if value.Enabled > 1 {
+		return fmt.Errorf("invalid control Map enabled value: %d", value.Enabled)
+	}
+	if value.Enabled == 0 {
+		return fmt.Errorf("cannot refresh disabled control Map")
+	}
+	value.HeartbeatNS = heartbeatNS
+	if err := control.Update(key, &value, ebpf.UpdateAny); err != nil {
+		return fmt.Errorf("refresh heartbeat: %w", err)
+	}
+	return nil
+}
+
 func validateControlValue(value ControlV1) error {
 	if value.ABIVersion != controlMapABIVersion {
 		return fmt.Errorf("control Map ABI mismatch: got %d want %d", value.ABIVersion, controlMapABIVersion)
