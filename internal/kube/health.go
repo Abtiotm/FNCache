@@ -16,7 +16,7 @@ type APIHealth struct {
 }
 
 func (h APIHealth) FreshAt(now time.Time, maxStaleness time.Duration) bool {
-	if !h.Synced || h.LastProbeAt.IsZero() || h.LastProbeErr != nil || h.InformerError != nil || maxStaleness <= 0 {
+	if !h.Synced || h.LastProbeAt.IsZero() || h.InformerError != nil || maxStaleness <= 0 {
 		return false
 	}
 	age := now.Sub(h.LastProbeAt)

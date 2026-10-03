@@ -73,6 +73,8 @@ func (s *InformerSource) WaitForSync(ctx context.Context) error {
 	}
 	s.healthMu.Lock()
 	s.synced = true
+	s.lastProbeAt = time.Now()
+	s.lastProbeErr = nil
 	s.healthMu.Unlock()
 	return nil
 }

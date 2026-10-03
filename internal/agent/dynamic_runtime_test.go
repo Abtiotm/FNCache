@@ -4,13 +4,16 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/cat-cc-Lcos/FNCache/internal/config"
 	"github.com/cat-cc-Lcos/FNCache/internal/controlplane"
@@ -172,6 +175,62 @@ func TestDynamicRuntimeDegradesWhenHeartbeatFails(t *testing.T) {
 	}
 	if len(events) == 0 || events[len(events)-1] != "disable" {
 		t.Fatalf("heartbeat failure did not disable fast path: events=%v", events)
+	}
+}
+
+func TestDynamicRuntimeDegradesWhenKubernetesAPIStale(t *testing.T) {
+	sources := controlplane.Sources{Preflight: dynamicObserverPreflight{}, Flannel: dynamicObserverFlannel{}, Endpoints: dynamicObserverEndpoints{}, Pins: dynamicObserverPins{}, TC: dynamicObserverTC{}, Rules: dynamicObserverRules{}}
+	events := []string{}
+	control := &dynamicRuntimeHeartbeatControl{localHandlerControl: &localHandlerControl{events: &events}}
+	cfg := dynamicTestConfig()
+	cfg.Heartbeat.Interval = config.Duration(10 * time.Millisecond)
+	cfg.Health.Interval = config.Duration(10 * time.Millisecond)
+	cfg.Kube.MaxStaleness = config.Duration(25 * time.Millisecond)
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a", UID: types.UID("node-a")}}
+	client := fake.NewSimpleClientset(node)
+	var apiDown atomic.Bool
+	for _, resource := range []string{"nodes", "pods"} {
+		client.PrependReactor("list", resource, func(k8stesting.Action) (bool, runtime.Object, error) {
+			if apiDown.Load() {
+				return true, nil, errors.New("API unavailable")
+			}
+			return false, nil, nil
+		})
+	}
+	factory := func(context.Context, datapathComponentConfig) (*datapathComponents, error) {
+		return &datapathComponents{
+			cri: &fakeCloser{}, endpointResolver: &localHandlerResolver{endpoint: handlerEndpoint("unused"), events: &events}, sources: sources,
+			tc: dynamicRuntimeTC{}, mapWriter: dynamicRuntimeMaps{}, ownership: &deleteOwnership{state: reconcile.OwnershipState{SchemaVersion: 1, InstallationID: "install", NodeUID: "node-a"}},
+			control: control, endpoint: &localHandlerEndpoint{events: &events}, maps: &localHandlerMaps{events: &events}, publisher: dynamicRuntimePublisher(t),
+		}, nil
+	}
+	runtime, err := newDynamicRuntimeWithFactory(cfg, client, factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- runtime.Run(context.Background()) }()
+	deadline := time.Now().Add(time.Second)
+	for runtime.AgentState() != reconcile.AgentReady && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if runtime.AgentState() != reconcile.AgentReady {
+		t.Fatalf("agent state = %s, want %s", runtime.AgentState(), reconcile.AgentReady)
+	}
+	apiDown.Store(true)
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrKubernetesAPIStale) {
+			t.Fatalf("Run error = %v, want ErrKubernetesAPIStale", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("stale Kubernetes API did not stop runtime")
+	}
+	if runtime.AgentState() != reconcile.AgentDegraded {
+		t.Fatalf("agent state = %s, want %s", runtime.AgentState(), reconcile.AgentDegraded)
+	}
+	if len(events) == 0 || events[len(events)-1] != "disable" {
+		t.Fatalf("stale API did not disable fast path: events=%v", events)
 	}
 }
 

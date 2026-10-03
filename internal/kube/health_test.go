@@ -17,7 +17,7 @@ func TestAPIHealthFreshAtRequiresSyncAndSuccessfulProbe(t *testing.T) {
 	}{
 		{name: "fresh", health: APIHealth{Synced: true, LastProbeAt: probeAt}, want: true},
 		{name: "not synced", health: APIHealth{LastProbeAt: probeAt}, want: false},
-		{name: "probe error", health: APIHealth{Synced: true, LastProbeAt: probeAt, LastProbeErr: errTestHealth}, want: false},
+		{name: "recent probe error", health: APIHealth{Synced: true, LastProbeAt: probeAt, LastProbeErr: errTestHealth}, want: true},
 		{name: "informer error", health: APIHealth{Synced: true, LastProbeAt: probeAt, InformerError: errTestHealth}, want: false},
 	}
 	for _, test := range tests {

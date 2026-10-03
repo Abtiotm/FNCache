@@ -117,8 +117,8 @@ func TestInformerSourceProbeAPIRecordsFailure(t *testing.T) {
 		t.Fatalf("unexpected API probe error: %v", err)
 	}
 	health := source.Health()
-	if health.LastProbeErr == nil || health.FreshAt(time.Now(), time.Minute) {
-		t.Fatalf("failed API probe was reported healthy: %+v", health)
+	if health.LastProbeErr == nil || !health.FreshAt(time.Now(), time.Minute) {
+		t.Fatalf("recent failed API probe was not retained as fresh: %+v", health)
 	}
 }
 

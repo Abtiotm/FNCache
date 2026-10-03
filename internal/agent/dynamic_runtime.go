@@ -34,6 +34,7 @@ type DynamicRuntime struct {
 	observer    *DynamicObserver
 	worker      *queue.Worker
 	heartbeat   *HeartbeatRefresher
+	apiHealth   *APIHealthMonitor
 }
 
 type datapathComponentFactory func(context.Context, datapathComponentConfig) (*datapathComponents, error)
@@ -90,7 +91,11 @@ func newDynamicRuntimeWithFactory(cfg config.AgentConfiguration, client kubernet
 	if err != nil {
 		return nil, err
 	}
-	return &DynamicRuntime{config: cfg, store: store, source: source, bootstrap: bootstrap, resync: resync, queue: target, barrier: reconcile.NewCoordinationBarrier(), lifecycle: reconcile.NewAgentStateMachine(), healthEpoch: NewHealthEpoch(), factory: factory}, nil
+	apiHealth, err := NewAPIHealthMonitor(APIHealthMonitorConfig{Source: source, Interval: time.Duration(cfg.Health.Interval), MaxStaleness: time.Duration(cfg.Kube.MaxStaleness)})
+	if err != nil {
+		return nil, err
+	}
+	return &DynamicRuntime{config: cfg, store: store, source: source, bootstrap: bootstrap, resync: resync, queue: target, barrier: reconcile.NewCoordinationBarrier(), lifecycle: reconcile.NewAgentStateMachine(), healthEpoch: NewHealthEpoch(), factory: factory, apiHealth: apiHealth}, nil
 }
 
 func (r *DynamicRuntime) Run(ctx context.Context) error {
@@ -128,7 +133,10 @@ func (r *DynamicRuntime) Run(ctx context.Context) error {
 	heartbeatDone := make(chan error, 1)
 	go func() { heartbeatDone <- r.heartbeat.Run(runCtx) }()
 	heartbeatObserved := false
-	workerStopped := false
+	apiHealthDone := make(chan error, 1)
+	go func() { apiHealthDone <- r.apiHealth.Run(runCtx) }()
+	apiHealthObserved := false
+	var failureErr error
 	var runErr, stopErr error
 	select {
 	case heartbeatErr := <-heartbeatDone:
@@ -141,16 +149,24 @@ func (r *DynamicRuntime) Run(ctx context.Context) error {
 			if heartbeatErr == nil {
 				heartbeatErr = fmt.Errorf("heartbeat refresher stopped unexpectedly")
 			}
+			failureErr = heartbeatErr
 		}
 		cancel()
 		r.queue.ShutDown()
-		if ctx.Err() == nil {
-			<-workerDone
-			workerStopped = true
-			disableErr := r.components.control.Disable(ctx)
-			degradedErr := r.lifecycle.Transition(reconcile.AgentDegraded)
-			runErr = errors.Join(heartbeatErr, disableErr, degradedErr)
+	case apiErr := <-apiHealthDone:
+		apiHealthObserved = true
+		if ctx.Err() != nil {
+			r.healthEpoch.Invalidate()
+			stopErr = r.lifecycle.Transition(reconcile.AgentStopping)
+		} else {
+			r.healthEpoch.Invalidate()
+			if apiErr == nil {
+				apiErr = fmt.Errorf("API health monitor stopped unexpectedly")
+			}
+			failureErr = apiErr
 		}
+		cancel()
+		r.queue.ShutDown()
 	case <-ctx.Done():
 		r.healthEpoch.Invalidate()
 		stopErr = r.lifecycle.Transition(reconcile.AgentStopping)
@@ -160,9 +176,17 @@ func (r *DynamicRuntime) Run(ctx context.Context) error {
 	if !heartbeatObserved {
 		<-heartbeatDone
 	}
+	if !apiHealthObserved {
+		<-apiHealthDone
+	}
 	r.queue.ShutDown()
-	if !workerStopped {
-		<-workerDone
+	<-workerDone
+	if failureErr != nil {
+		disableCtx, disableCancel := context.WithTimeout(context.Background(), time.Duration(r.config.Heartbeat.Timeout))
+		disableErr := r.components.control.Disable(disableCtx)
+		disableCancel()
+		degradedErr := r.lifecycle.Transition(reconcile.AgentDegraded)
+		runErr = errors.Join(failureErr, disableErr, degradedErr)
 	}
 	if r.components != nil {
 		return errors.Join(runErr, stopErr, r.components.Close())
