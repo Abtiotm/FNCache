@@ -20,21 +20,22 @@ import (
 )
 
 type DynamicRuntime struct {
-	config      config.AgentConfiguration
-	store       *kube.SnapshotStore
-	source      *kube.InformerSource
-	bootstrap   *KubeBootstrap
-	resync      *kube.ResyncScheduler
-	queue       *queue.Queue
-	barrier     *reconcile.CoordinationBarrier
-	lifecycle   *reconcile.AgentStateMachine
-	healthEpoch *HealthEpoch
-	factory     datapathComponentFactory
-	components  *datapathComponents
-	observer    *DynamicObserver
-	worker      *queue.Worker
-	heartbeat   *HeartbeatRefresher
-	apiHealth   *APIHealthMonitor
+	config        config.AgentConfiguration
+	store         *kube.SnapshotStore
+	source        *kube.InformerSource
+	bootstrap     *KubeBootstrap
+	resync        *kube.ResyncScheduler
+	queue         *queue.Queue
+	barrier       *reconcile.CoordinationBarrier
+	lifecycle     *reconcile.AgentStateMachine
+	healthEpoch   *HealthEpoch
+	factory       datapathComponentFactory
+	components    *datapathComponents
+	observer      *DynamicObserver
+	worker        *queue.Worker
+	heartbeat     *HeartbeatRefresher
+	apiHealth     *APIHealthMonitor
+	flannelHealth *FlannelHealthMonitor
 }
 
 type datapathComponentFactory func(context.Context, datapathComponentConfig) (*datapathComponents, error)
@@ -136,6 +137,9 @@ func (r *DynamicRuntime) Run(ctx context.Context) error {
 	apiHealthDone := make(chan error, 1)
 	go func() { apiHealthDone <- r.apiHealth.Run(runCtx) }()
 	apiHealthObserved := false
+	flannelDone := make(chan error, 1)
+	go func() { flannelDone <- r.flannelHealth.Run(runCtx) }()
+	flannelObserved := false
 	var failureErr error
 	var runErr, stopErr error
 	select {
@@ -167,6 +171,20 @@ func (r *DynamicRuntime) Run(ctx context.Context) error {
 		}
 		cancel()
 		r.queue.ShutDown()
+	case flannelErr := <-flannelDone:
+		flannelObserved = true
+		if ctx.Err() != nil {
+			r.healthEpoch.Invalidate()
+			stopErr = r.lifecycle.Transition(reconcile.AgentStopping)
+		} else {
+			r.healthEpoch.Invalidate()
+			if flannelErr == nil {
+				flannelErr = fmt.Errorf("Flannel health monitor stopped unexpectedly")
+			}
+			failureErr = flannelErr
+		}
+		cancel()
+		r.queue.ShutDown()
 	case <-ctx.Done():
 		r.healthEpoch.Invalidate()
 		stopErr = r.lifecycle.Transition(reconcile.AgentStopping)
@@ -178,6 +196,9 @@ func (r *DynamicRuntime) Run(ctx context.Context) error {
 	}
 	if !apiHealthObserved {
 		<-apiHealthDone
+	}
+	if !flannelObserved {
+		<-flannelDone
 	}
 	r.queue.ShutDown()
 	<-workerDone
@@ -197,6 +218,10 @@ func (r *DynamicRuntime) Run(ctx context.Context) error {
 func (r *DynamicRuntime) State() KubeBootstrapState { return r.bootstrap.State() }
 
 func (r *DynamicRuntime) AgentState() reconcile.AgentState { return r.lifecycle.State() }
+
+func (r *DynamicRuntime) flannelDiscoveryRequest() flannel.DiscoveryRequest {
+	return flannel.DiscoveryRequest{VXLANLinkName: r.config.Overlay.VXLANLinkName, UnderlayDevice: r.config.Overlay.Device, MissMask: r.config.Markers.MissMask, EstablishedMask: r.config.Markers.EstablishedMask, IPTablesBackend: "iptables-nft"}
+}
 
 func (r *DynamicRuntime) initializeDatapath(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
@@ -219,7 +244,7 @@ func (r *DynamicRuntime) initializeDatapath(ctx context.Context) error {
 		InstallationID: r.config.InstallationID, ELFBuildID: r.config.Datapath.ELFBuildID, HeartbeatNS: heartbeat,
 		HeartbeatTimeoutNS: uint64(time.Duration(r.config.Heartbeat.Timeout)), Flags: 0,
 		Preflight: discovery.PreflightRequest{Node: node.Identity, PinRoot: r.config.PinRoot, StateDir: r.config.StateDir, RuntimeURI: r.config.RuntimeEndpoint, Overlay: r.config.Overlay.Type},
-		Flannel:   flannel.DiscoveryRequest{VXLANLinkName: r.config.Overlay.VXLANLinkName, UnderlayDevice: r.config.Overlay.Device, MissMask: r.config.Markers.MissMask, EstablishedMask: r.config.Markers.EstablishedMask, IPTablesBackend: "iptables-nft"},
+		Flannel:   r.flannelDiscoveryRequest(),
 		Marker:    flannel.MarkerRuleSpec{Chain: r.config.Markers.Chain, Comment: r.config.Markers.Comment},
 	})
 	if err != nil {
@@ -234,6 +259,21 @@ func (r *DynamicRuntime) initializeDatapath(ctx context.Context) error {
 		Control: heartbeatControl, Epoch: r.healthEpoch, State: r.AgentState,
 		Interval: time.Duration(r.config.Heartbeat.Interval), Now: monotonicNowNS,
 	})
+	if err != nil {
+		_ = components.Close()
+		return err
+	}
+	flannelRequest := r.flannelDiscoveryRequest()
+	flannelBaseline, err := components.sources.Flannel.Discover(ctx, flannelRequest)
+	if err != nil {
+		_ = components.Close()
+		return fmt.Errorf("discover Flannel baseline: %w", err)
+	}
+	if err := flannelBaseline.Validate(); err != nil {
+		_ = components.Close()
+		return fmt.Errorf("validate Flannel baseline: %w", err)
+	}
+	flannelHealth, err := NewFlannelHealthMonitor(FlannelHealthMonitorConfig{Source: components.sources.Flannel, Request: flannelRequest, ExpectedFingerprint: flannelBaseline.Fingerprint, Interval: time.Duration(r.config.Health.Interval)})
 	if err != nil {
 		_ = components.Close()
 		return err
@@ -278,6 +318,6 @@ func (r *DynamicRuntime) initializeDatapath(ctx context.Context) error {
 		_ = components.Close()
 		return err
 	}
-	r.components, r.observer, r.worker, r.heartbeat = components, observer, worker, heartbeatRefresher
+	r.components, r.observer, r.worker, r.heartbeat, r.flannelHealth = components, observer, worker, heartbeatRefresher, flannelHealth
 	return nil
 }
