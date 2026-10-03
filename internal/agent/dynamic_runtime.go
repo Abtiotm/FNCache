@@ -36,6 +36,7 @@ type DynamicRuntime struct {
 	heartbeat     *HeartbeatRefresher
 	apiHealth     *APIHealthMonitor
 	flannelHealth *FlannelHealthMonitor
+	markerHealth  *MarkerHealthMonitor
 }
 
 type datapathComponentFactory func(context.Context, datapathComponentConfig) (*datapathComponents, error)
@@ -140,6 +141,9 @@ func (r *DynamicRuntime) Run(ctx context.Context) error {
 	flannelDone := make(chan error, 1)
 	go func() { flannelDone <- r.flannelHealth.Run(runCtx) }()
 	flannelObserved := false
+	markerDone := make(chan error, 1)
+	go func() { markerDone <- r.markerHealth.Run(runCtx) }()
+	markerObserved := false
 	var failureErr error
 	var runErr, stopErr error
 	select {
@@ -185,6 +189,20 @@ func (r *DynamicRuntime) Run(ctx context.Context) error {
 		}
 		cancel()
 		r.queue.ShutDown()
+	case markerErr := <-markerDone:
+		markerObserved = true
+		if ctx.Err() != nil {
+			r.healthEpoch.Invalidate()
+			stopErr = r.lifecycle.Transition(reconcile.AgentStopping)
+		} else {
+			r.healthEpoch.Invalidate()
+			if markerErr == nil {
+				markerErr = fmt.Errorf("marker health monitor stopped unexpectedly")
+			}
+			failureErr = markerErr
+		}
+		cancel()
+		r.queue.ShutDown()
 	case <-ctx.Done():
 		r.healthEpoch.Invalidate()
 		stopErr = r.lifecycle.Transition(reconcile.AgentStopping)
@@ -199,6 +217,9 @@ func (r *DynamicRuntime) Run(ctx context.Context) error {
 	}
 	if !flannelObserved {
 		<-flannelDone
+	}
+	if !markerObserved {
+		<-markerDone
 	}
 	r.queue.ShutDown()
 	<-workerDone
@@ -223,6 +244,10 @@ func (r *DynamicRuntime) flannelDiscoveryRequest() flannel.DiscoveryRequest {
 	return flannel.DiscoveryRequest{VXLANLinkName: r.config.Overlay.VXLANLinkName, UnderlayDevice: r.config.Overlay.Device, MissMask: r.config.Markers.MissMask, EstablishedMask: r.config.Markers.EstablishedMask, IPTablesBackend: "iptables-nft"}
 }
 
+func (r *DynamicRuntime) markerRuleSpec() flannel.MarkerRuleSpec {
+	return flannel.MarkerRuleSpec{Chain: r.config.Markers.Chain, Comment: r.config.Markers.Comment}
+}
+
 func (r *DynamicRuntime) initializeDatapath(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -245,7 +270,7 @@ func (r *DynamicRuntime) initializeDatapath(ctx context.Context) error {
 		HeartbeatTimeoutNS: uint64(time.Duration(r.config.Heartbeat.Timeout)), Flags: 0,
 		Preflight: discovery.PreflightRequest{Node: node.Identity, PinRoot: r.config.PinRoot, StateDir: r.config.StateDir, RuntimeURI: r.config.RuntimeEndpoint, Overlay: r.config.Overlay.Type},
 		Flannel:   r.flannelDiscoveryRequest(),
-		Marker:    flannel.MarkerRuleSpec{Chain: r.config.Markers.Chain, Comment: r.config.Markers.Comment},
+		Marker:    r.markerRuleSpec(),
 	})
 	if err != nil {
 		return fmt.Errorf("create dynamic datapath components: %w", err)
@@ -274,6 +299,12 @@ func (r *DynamicRuntime) initializeDatapath(ctx context.Context) error {
 		return fmt.Errorf("validate Flannel baseline: %w", err)
 	}
 	flannelHealth, err := NewFlannelHealthMonitor(FlannelHealthMonitorConfig{Source: components.sources.Flannel, Request: flannelRequest, ExpectedFingerprint: flannelBaseline.Fingerprint, Interval: time.Duration(r.config.Health.Interval)})
+	if err != nil {
+		_ = components.Close()
+		return err
+	}
+	markerSpec := r.markerRuleSpec()
+	markerHealth, err := NewMarkerHealthMonitor(MarkerHealthMonitorConfig{Source: components.sources.Rules, Pins: components.sources.Pins, Spec: markerSpec, ExpectedFingerprint: flannel.ExpectedMarkerFingerprint(markerSpec), Interval: time.Duration(r.config.Health.Interval)})
 	if err != nil {
 		_ = components.Close()
 		return err
@@ -318,6 +349,6 @@ func (r *DynamicRuntime) initializeDatapath(ctx context.Context) error {
 		_ = components.Close()
 		return err
 	}
-	r.components, r.observer, r.worker, r.heartbeat, r.flannelHealth = components, observer, worker, heartbeatRefresher, flannelHealth
+	r.components, r.observer, r.worker, r.heartbeat, r.flannelHealth, r.markerHealth = components, observer, worker, heartbeatRefresher, flannelHealth, markerHealth
 	return nil
 }

@@ -51,6 +51,16 @@ func (s dynamicRuntimeFlannelHealth) Discover(ctx context.Context, request flann
 	return config, err
 }
 
+type dynamicRuntimeMarkerHealth struct{ drift *atomic.Bool }
+
+func (s dynamicRuntimeMarkerHealth) Scan(ctx context.Context, spec flannel.MarkerRuleSpec) (reconcile.RuleState, error) {
+	state, err := (dynamicObserverRules{}).Scan(ctx, spec)
+	if err == nil && s.drift.Load() {
+		state.Fingerprint = "drifted"
+	}
+	return state, err
+}
+
 type dynamicRuntimeHeartbeatControl struct {
 	*localHandlerControl
 	mu         sync.Mutex
@@ -289,6 +299,53 @@ func TestDynamicRuntimeDegradesWhenFlannelDrifts(t *testing.T) {
 	}
 	if len(events) == 0 || events[len(events)-1] != "disable" {
 		t.Fatalf("Flannel drift did not disable fast path: events=%v", events)
+	}
+}
+
+func TestDynamicRuntimeDegradesWhenMarkerRuleDrifts(t *testing.T) {
+	events := []string{}
+	control := &dynamicRuntimeHeartbeatControl{localHandlerControl: &localHandlerControl{events: &events}}
+	cfg := dynamicTestConfig()
+	cfg.Heartbeat.Interval = config.Duration(10 * time.Millisecond)
+	cfg.Health.Interval = config.Duration(10 * time.Millisecond)
+	cfg.Kube.MaxStaleness = config.Duration(30 * time.Millisecond)
+	var drift atomic.Bool
+	sources := controlplane.Sources{Preflight: dynamicObserverPreflight{}, Flannel: dynamicObserverFlannel{}, Endpoints: dynamicObserverEndpoints{}, Pins: dynamicObserverPins{}, TC: dynamicObserverTC{}, Rules: dynamicRuntimeMarkerHealth{drift: &drift}}
+	factory := func(context.Context, datapathComponentConfig) (*datapathComponents, error) {
+		return &datapathComponents{
+			cri: &fakeCloser{}, endpointResolver: &localHandlerResolver{endpoint: handlerEndpoint("unused"), events: &events}, sources: sources,
+			tc: dynamicRuntimeTC{}, mapWriter: dynamicRuntimeMaps{}, ownership: &deleteOwnership{state: reconcile.OwnershipState{SchemaVersion: 1, InstallationID: "install", NodeUID: "node-a"}},
+			control: control, endpoint: &localHandlerEndpoint{events: &events}, maps: &localHandlerMaps{events: &events}, publisher: dynamicRuntimePublisher(t),
+		}, nil
+	}
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a", UID: types.UID("node-a")}}
+	runtime, err := newDynamicRuntimeWithFactory(cfg, fake.NewSimpleClientset(node), factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- runtime.Run(context.Background()) }()
+	deadline := time.Now().Add(time.Second)
+	for runtime.AgentState() != reconcile.AgentReady && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if runtime.AgentState() != reconcile.AgentReady {
+		t.Fatalf("agent state = %s, want %s", runtime.AgentState(), reconcile.AgentReady)
+	}
+	drift.Store(true)
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrMarkerDrift) {
+			t.Fatalf("Run error = %v, want ErrMarkerDrift", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("marker drift did not stop runtime")
+	}
+	if runtime.AgentState() != reconcile.AgentDegraded {
+		t.Fatalf("agent state = %s, want %s", runtime.AgentState(), reconcile.AgentDegraded)
+	}
+	if len(events) == 0 || events[len(events)-1] != "disable" {
+		t.Fatalf("marker drift did not disable fast path: events=%v", events)
 	}
 }
 
