@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"sync"
 	"sync/atomic"
 
 	"github.com/cat-cc-Lcos/FNCache/internal/config"
@@ -20,6 +21,8 @@ type DynamicObserver struct {
 	store      *kube.SnapshotStore
 	sources    controlplane.Sources
 	generation atomic.Uint64
+	linksMu    sync.RWMutex
+	knownLinks []resolver.LinkIdentity
 }
 
 func NewDynamicObserver(cfg config.AgentConfiguration, store *kube.SnapshotStore, sources controlplane.Sources) (*DynamicObserver, error) {
@@ -77,6 +80,9 @@ func (o *DynamicObserver) buildObserver(ctx context.Context, snapshot kube.Snaps
 	}
 	baseLinks := []resolver.LinkIdentity{flannelConfig.UnderlayLink}
 	links := resolver.MergeEndpointLinks(baseLinks, endpoints.Endpoints)
+	o.linksMu.Lock()
+	o.knownLinks = append([]resolver.LinkIdentity(nil), links...)
+	o.linksMu.Unlock()
 	observer, err := controlplane.NewObserver(o.sources, controlplane.ObservationInput{
 		Generation:       o.generation.Add(1),
 		PreflightRequest: discovery.PreflightRequest{Node: node.Identity, PinRoot: o.config.PinRoot, StateDir: o.config.StateDir, RuntimeURI: o.config.RuntimeEndpoint, Overlay: o.config.Overlay.Type},
@@ -88,6 +94,43 @@ func (o *DynamicObserver) buildObserver(ctx context.Context, snapshot kube.Snaps
 		return nil, err
 	}
 	return observer, nil
+}
+
+func (o *DynamicObserver) IncrementalScan(ctx context.Context) (reconcile.ActualState, error) {
+	if err := ctx.Err(); err != nil {
+		return reconcile.ActualState{}, err
+	}
+	o.linksMu.RLock()
+	links := append([]resolver.LinkIdentity(nil), o.knownLinks...)
+	o.linksMu.RUnlock()
+	if len(links) == 0 {
+		return reconcile.ActualState{}, fmt.Errorf("incremental scan has no known links")
+	}
+	actual, err := o.sources.Pins.Scan(ctx)
+	if err != nil {
+		return reconcile.ActualState{}, fmt.Errorf("incremental scan BPF pins: %w", err)
+	}
+	tc, err := o.sources.TC.Scan(ctx, links)
+	if err != nil {
+		return reconcile.ActualState{}, fmt.Errorf("incremental scan TC: %w", err)
+	}
+	actual.Attachments = append(actual.Attachments, tc.Attachments...)
+	actual.Conflicts = append(actual.Conflicts, tc.Conflicts...)
+	if actual.ScannedAt.IsZero() {
+		actual.ScannedAt = tc.ScannedAt
+	}
+	marker := flannel.MarkerRuleSpec{Chain: o.config.Markers.Chain, Comment: o.config.Markers.Comment}
+	actual.FlannelRule, err = o.sources.Rules.Scan(ctx, marker)
+	if err != nil {
+		return reconcile.ActualState{}, fmt.Errorf("incremental scan Flannel rule: %w", err)
+	}
+	return actual, nil
+}
+
+func (o *DynamicObserver) KnownLinks() []resolver.LinkIdentity {
+	o.linksMu.RLock()
+	defer o.linksMu.RUnlock()
+	return append([]resolver.LinkIdentity(nil), o.knownLinks...)
 }
 
 func localPodsFromSnapshot(snapshot kube.Snapshot, nodeName string) []resolver.PodSnapshot {
