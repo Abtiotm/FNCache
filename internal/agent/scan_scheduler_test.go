@@ -22,7 +22,7 @@ func newTestScanScheduler(t *testing.T, calls *[]ScanLevel, running *int, mu *sy
 			return ScanResult{Reason: "SCAN_OK"}
 		}
 	}
-	scheduler, err := NewScanScheduler(ScanSchedulerConfig{Light: fn(ScanLight), Incremental: fn(ScanIncremental), Full: fn(ScanFull), IncrementalInterval: time.Hour, FullInterval: 2 * time.Hour})
+	scheduler, err := NewScanScheduler(ScanSchedulerConfig{Light: fn(ScanLight), Incremental: fn(ScanIncremental), Full: fn(ScanFull), LightInterval: time.Hour, IncrementalInterval: time.Hour, FullInterval: 2 * time.Hour})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestScanSchedulerRunsPeriodicIncremental(t *testing.T) {
 			mu.Unlock()
 			return ScanResult{}
 		},
-		Full: func(context.Context) ScanResult { return ScanResult{} }, IncrementalInterval: time.Millisecond, FullInterval: time.Hour,
+		Full: func(context.Context) ScanResult { return ScanResult{} }, LightInterval: time.Hour, IncrementalInterval: time.Millisecond, FullInterval: time.Hour,
 	})
 	if err != nil {
 		t.Fatal(err)

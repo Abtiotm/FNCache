@@ -32,6 +32,7 @@ type ScanSchedulerConfig struct {
 	Light               ScanFunc
 	Incremental         ScanFunc
 	Full                ScanFunc
+	LightInterval       time.Duration
 	IncrementalInterval time.Duration
 	FullInterval        time.Duration
 	Now                 func() time.Time
@@ -41,6 +42,7 @@ type ScanScheduler struct {
 	light               ScanFunc
 	incremental         ScanFunc
 	full                ScanFunc
+	lightInterval       time.Duration
 	incrementalInterval time.Duration
 	fullInterval        time.Duration
 	now                 func() time.Time
@@ -51,13 +53,13 @@ type ScanScheduler struct {
 }
 
 func NewScanScheduler(config ScanSchedulerConfig) (*ScanScheduler, error) {
-	if config.Light == nil || config.Incremental == nil || config.Full == nil || config.IncrementalInterval <= 0 || config.FullInterval < config.IncrementalInterval {
+	if config.Light == nil || config.Incremental == nil || config.Full == nil || config.LightInterval <= 0 || config.IncrementalInterval <= 0 || config.FullInterval < config.IncrementalInterval {
 		return nil, fmt.Errorf("scan scheduler dependencies and intervals are required")
 	}
 	if config.Now == nil {
 		config.Now = time.Now
 	}
-	return &ScanScheduler{light: config.Light, incremental: config.Incremental, full: config.Full, incrementalInterval: config.IncrementalInterval, fullInterval: config.FullInterval, now: config.Now, wake: make(chan struct{}, 1)}, nil
+	return &ScanScheduler{light: config.Light, incremental: config.Incremental, full: config.Full, lightInterval: config.LightInterval, incrementalInterval: config.IncrementalInterval, fullInterval: config.FullInterval, now: config.Now, wake: make(chan struct{}, 1)}, nil
 }
 
 func (s *ScanScheduler) Trigger(level ScanLevel) error {
@@ -86,8 +88,10 @@ func (s *ScanScheduler) run(ctx context.Context, results chan<- ScanResult) {
 	defer close(results)
 	incremental := time.NewTicker(s.incrementalInterval)
 	full := time.NewTicker(s.fullInterval)
+	light := time.NewTicker(s.lightInterval)
 	defer incremental.Stop()
 	defer full.Stop()
+	defer light.Stop()
 	for {
 		if level, ok := s.takePending(); ok {
 			result := s.execute(ctx, level)
@@ -102,6 +106,8 @@ func (s *ScanScheduler) run(ctx context.Context, results chan<- ScanResult) {
 		case <-ctx.Done():
 			return
 		case <-s.wake:
+		case <-light.C:
+			_ = s.Trigger(ScanLight)
 		case <-incremental.C:
 			_ = s.Trigger(ScanIncremental)
 		case <-full.C:

@@ -37,6 +37,7 @@ type DynamicRuntime struct {
 	apiHealth     *APIHealthMonitor
 	flannelHealth *FlannelHealthMonitor
 	markerHealth  *MarkerHealthMonitor
+	scanScheduler *ScanScheduler
 }
 
 type datapathComponentFactory func(context.Context, datapathComponentConfig) (*datapathComponents, error)
@@ -135,91 +136,64 @@ func (r *DynamicRuntime) Run(ctx context.Context) error {
 	heartbeatDone := make(chan error, 1)
 	go func() { heartbeatDone <- r.heartbeat.Run(runCtx) }()
 	heartbeatObserved := false
-	apiHealthDone := make(chan error, 1)
-	go func() { apiHealthDone <- r.apiHealth.Run(runCtx) }()
-	apiHealthObserved := false
-	flannelDone := make(chan error, 1)
-	go func() { flannelDone <- r.flannelHealth.Run(runCtx) }()
-	flannelObserved := false
-	markerDone := make(chan error, 1)
-	go func() { markerDone <- r.markerHealth.Run(runCtx) }()
-	markerObserved := false
+	scanResults := r.scanScheduler.Run(runCtx)
+	_ = r.scanScheduler.Trigger(ScanFull)
 	var failureErr error
 	var runErr, stopErr error
-	select {
-	case heartbeatErr := <-heartbeatDone:
-		heartbeatObserved = true
-		if ctx.Err() != nil {
+	stopped := false
+	for !stopped {
+		select {
+		case heartbeatErr := <-heartbeatDone:
+			heartbeatObserved = true
+			if ctx.Err() != nil {
+				r.healthEpoch.Invalidate()
+				stopErr = r.lifecycle.Transition(reconcile.AgentStopping)
+			} else {
+				r.healthEpoch.Invalidate()
+				if heartbeatErr == nil {
+					heartbeatErr = fmt.Errorf("heartbeat refresher stopped unexpectedly")
+				}
+				failureErr = heartbeatErr
+			}
+			cancel()
+			r.queue.ShutDown()
+			stopped = true
+		case result, ok := <-scanResults:
+			if !ok {
+				if ctx.Err() != nil {
+					r.healthEpoch.Invalidate()
+					stopErr = r.lifecycle.Transition(reconcile.AgentStopping)
+				} else {
+					r.healthEpoch.Invalidate()
+					failureErr = fmt.Errorf("scan scheduler stopped unexpectedly")
+				}
+				cancel()
+				r.queue.ShutDown()
+				stopped = true
+				continue
+			}
+			if result.Critical || result.InvalidateEpoch {
+				r.healthEpoch.Invalidate()
+				failureErr = result.Err
+				if failureErr == nil {
+					failureErr = fmt.Errorf("%s", result.Reason)
+				}
+				cancel()
+				r.queue.ShutDown()
+				stopped = true
+			}
+		case <-ctx.Done():
 			r.healthEpoch.Invalidate()
 			stopErr = r.lifecycle.Transition(reconcile.AgentStopping)
-		} else {
-			r.healthEpoch.Invalidate()
-			if heartbeatErr == nil {
-				heartbeatErr = fmt.Errorf("heartbeat refresher stopped unexpectedly")
-			}
-			failureErr = heartbeatErr
+			cancel()
+			r.queue.ShutDown()
+			stopped = true
 		}
-		cancel()
-		r.queue.ShutDown()
-	case apiErr := <-apiHealthDone:
-		apiHealthObserved = true
-		if ctx.Err() != nil {
-			r.healthEpoch.Invalidate()
-			stopErr = r.lifecycle.Transition(reconcile.AgentStopping)
-		} else {
-			r.healthEpoch.Invalidate()
-			if apiErr == nil {
-				apiErr = fmt.Errorf("API health monitor stopped unexpectedly")
-			}
-			failureErr = apiErr
-		}
-		cancel()
-		r.queue.ShutDown()
-	case flannelErr := <-flannelDone:
-		flannelObserved = true
-		if ctx.Err() != nil {
-			r.healthEpoch.Invalidate()
-			stopErr = r.lifecycle.Transition(reconcile.AgentStopping)
-		} else {
-			r.healthEpoch.Invalidate()
-			if flannelErr == nil {
-				flannelErr = fmt.Errorf("Flannel health monitor stopped unexpectedly")
-			}
-			failureErr = flannelErr
-		}
-		cancel()
-		r.queue.ShutDown()
-	case markerErr := <-markerDone:
-		markerObserved = true
-		if ctx.Err() != nil {
-			r.healthEpoch.Invalidate()
-			stopErr = r.lifecycle.Transition(reconcile.AgentStopping)
-		} else {
-			r.healthEpoch.Invalidate()
-			if markerErr == nil {
-				markerErr = fmt.Errorf("marker health monitor stopped unexpectedly")
-			}
-			failureErr = markerErr
-		}
-		cancel()
-		r.queue.ShutDown()
-	case <-ctx.Done():
-		r.healthEpoch.Invalidate()
-		stopErr = r.lifecycle.Transition(reconcile.AgentStopping)
-		cancel()
-		r.queue.ShutDown()
 	}
 	if !heartbeatObserved {
 		<-heartbeatDone
 	}
-	if !apiHealthObserved {
-		<-apiHealthDone
-	}
-	if !flannelObserved {
-		<-flannelDone
-	}
-	if !markerObserved {
-		<-markerDone
+	for range scanResults {
 	}
 	r.queue.ShutDown()
 	<-workerDone
@@ -314,6 +288,19 @@ func (r *DynamicRuntime) initializeDatapath(ctx context.Context) error {
 		_ = components.Close()
 		return err
 	}
+	scanAdapter, err := NewRuntimeScanAdapter(observer, r.apiHealth.Check, flannelHealth.Check, markerHealth.Check)
+	if err != nil {
+		_ = components.Close()
+		return err
+	}
+	scanScheduler, err := NewScanScheduler(ScanSchedulerConfig{
+		Light: scanAdapter.Light, Incremental: scanAdapter.Incremental, Full: scanAdapter.Full,
+		LightInterval: time.Duration(r.config.Health.Interval), IncrementalInterval: time.Duration(r.config.Scan.IncrementalInterval), FullInterval: time.Duration(r.config.Scan.FullInterval),
+	})
+	if err != nil {
+		_ = components.Close()
+		return err
+	}
 	remover, err := controlplane.NewEndpointRemover(components.mapWriter, components.tc)
 	if err != nil {
 		_ = components.Close()
@@ -349,6 +336,6 @@ func (r *DynamicRuntime) initializeDatapath(ctx context.Context) error {
 		_ = components.Close()
 		return err
 	}
-	r.components, r.observer, r.worker, r.heartbeat, r.flannelHealth, r.markerHealth = components, observer, worker, heartbeatRefresher, flannelHealth, markerHealth
+	r.components, r.observer, r.worker, r.heartbeat, r.flannelHealth, r.markerHealth, r.scanScheduler = components, observer, worker, heartbeatRefresher, flannelHealth, markerHealth, scanScheduler
 	return nil
 }
