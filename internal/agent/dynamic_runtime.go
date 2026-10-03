@@ -20,18 +20,20 @@ import (
 )
 
 type DynamicRuntime struct {
-	config     config.AgentConfiguration
-	store      *kube.SnapshotStore
-	source     *kube.InformerSource
-	bootstrap  *KubeBootstrap
-	resync     *kube.ResyncScheduler
-	queue      *queue.Queue
-	barrier    *reconcile.CoordinationBarrier
-	lifecycle  *reconcile.AgentStateMachine
-	factory    datapathComponentFactory
-	components *datapathComponents
-	observer   *DynamicObserver
-	worker     *queue.Worker
+	config      config.AgentConfiguration
+	store       *kube.SnapshotStore
+	source      *kube.InformerSource
+	bootstrap   *KubeBootstrap
+	resync      *kube.ResyncScheduler
+	queue       *queue.Queue
+	barrier     *reconcile.CoordinationBarrier
+	lifecycle   *reconcile.AgentStateMachine
+	healthEpoch *HealthEpoch
+	factory     datapathComponentFactory
+	components  *datapathComponents
+	observer    *DynamicObserver
+	worker      *queue.Worker
+	heartbeat   *HeartbeatRefresher
 }
 
 type datapathComponentFactory func(context.Context, datapathComponentConfig) (*datapathComponents, error)
@@ -88,7 +90,7 @@ func newDynamicRuntimeWithFactory(cfg config.AgentConfiguration, client kubernet
 	if err != nil {
 		return nil, err
 	}
-	return &DynamicRuntime{config: cfg, store: store, source: source, bootstrap: bootstrap, resync: resync, queue: target, barrier: reconcile.NewCoordinationBarrier(), lifecycle: reconcile.NewAgentStateMachine(), factory: factory}, nil
+	return &DynamicRuntime{config: cfg, store: store, source: source, bootstrap: bootstrap, resync: resync, queue: target, barrier: reconcile.NewCoordinationBarrier(), lifecycle: reconcile.NewAgentStateMachine(), healthEpoch: NewHealthEpoch(), factory: factory}, nil
 }
 
 func (r *DynamicRuntime) Run(ctx context.Context) error {
@@ -107,26 +109,65 @@ func (r *DynamicRuntime) Run(ctx context.Context) error {
 		}
 		return err
 	}
-	go r.resync.Run(ctx)
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go r.resync.Run(runCtx)
 	workerDone := make(chan struct{})
 	go func() {
-		r.worker.Run(ctx)
+		r.worker.Run(runCtx)
 		close(workerDone)
 	}()
 	if err := r.lifecycle.Transition(reconcile.AgentReady); err != nil {
+		cancel()
 		r.queue.ShutDown()
 		<-workerDone
 		_ = r.components.Close()
 		return err
 	}
-	<-ctx.Done()
-	stopErr := r.lifecycle.Transition(reconcile.AgentStopping)
-	r.queue.ShutDown()
-	<-workerDone
-	if r.components != nil {
-		return errors.Join(stopErr, r.components.Close())
+	r.healthEpoch.Advance()
+	heartbeatDone := make(chan error, 1)
+	go func() { heartbeatDone <- r.heartbeat.Run(runCtx) }()
+	heartbeatObserved := false
+	workerStopped := false
+	var runErr, stopErr error
+	select {
+	case heartbeatErr := <-heartbeatDone:
+		heartbeatObserved = true
+		if ctx.Err() != nil {
+			r.healthEpoch.Invalidate()
+			stopErr = r.lifecycle.Transition(reconcile.AgentStopping)
+		} else {
+			r.healthEpoch.Invalidate()
+			if heartbeatErr == nil {
+				heartbeatErr = fmt.Errorf("heartbeat refresher stopped unexpectedly")
+			}
+		}
+		cancel()
+		r.queue.ShutDown()
+		if ctx.Err() == nil {
+			<-workerDone
+			workerStopped = true
+			disableErr := r.components.control.Disable(ctx)
+			degradedErr := r.lifecycle.Transition(reconcile.AgentDegraded)
+			runErr = errors.Join(heartbeatErr, disableErr, degradedErr)
+		}
+	case <-ctx.Done():
+		r.healthEpoch.Invalidate()
+		stopErr = r.lifecycle.Transition(reconcile.AgentStopping)
+		cancel()
+		r.queue.ShutDown()
 	}
-	return stopErr
+	if !heartbeatObserved {
+		<-heartbeatDone
+	}
+	r.queue.ShutDown()
+	if !workerStopped {
+		<-workerDone
+	}
+	if r.components != nil {
+		return errors.Join(runErr, stopErr, r.components.Close())
+	}
+	return errors.Join(runErr, stopErr)
 }
 
 func (r *DynamicRuntime) State() KubeBootstrapState { return r.bootstrap.State() }
@@ -159,6 +200,19 @@ func (r *DynamicRuntime) initializeDatapath(ctx context.Context) error {
 	})
 	if err != nil {
 		return fmt.Errorf("create dynamic datapath components: %w", err)
+	}
+	heartbeatControl, ok := components.control.(HeartbeatControl)
+	if !ok {
+		_ = components.Close()
+		return fmt.Errorf("dynamic datapath heartbeat control is unavailable")
+	}
+	heartbeatRefresher, err := NewHeartbeatRefresher(HeartbeatRefresherConfig{
+		Control: heartbeatControl, Epoch: r.healthEpoch, State: r.AgentState,
+		Interval: time.Duration(r.config.Heartbeat.Interval), Now: monotonicNowNS,
+	})
+	if err != nil {
+		_ = components.Close()
+		return err
 	}
 	observer, err := NewDynamicObserver(r.config, r.store, components.sources)
 	if err != nil {
@@ -200,6 +254,6 @@ func (r *DynamicRuntime) initializeDatapath(ctx context.Context) error {
 		_ = components.Close()
 		return err
 	}
-	r.components, r.observer, r.worker = components, observer, worker
+	r.components, r.observer, r.worker, r.heartbeat = components, observer, worker, heartbeatRefresher
 	return nil
 }

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -36,6 +37,29 @@ func (dynamicRuntimePublisherControl) Publish(context.Context, uint64, uint64, u
 	return nil
 }
 
+type dynamicRuntimeHeartbeatControl struct {
+	*localHandlerControl
+	mu         sync.Mutex
+	heartbeats []uint64
+	refreshErr error
+}
+
+func (c *dynamicRuntimeHeartbeatControl) RefreshHeartbeat(_ context.Context, heartbeat uint64) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.refreshErr != nil {
+		return c.refreshErr
+	}
+	c.heartbeats = append(c.heartbeats, heartbeat)
+	return nil
+}
+
+func (c *dynamicRuntimeHeartbeatControl) HeartbeatCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.heartbeats)
+}
+
 func dynamicRuntimePublisher(t *testing.T) *controlplane.Publisher {
 	t.Helper()
 	publisher, err := controlplane.NewPublisher(dynamicRuntimeCommitter{}, dynamicRuntimePublisherControl{}, controlplane.PublishConfig{InstallationID: "install", NodeUID: "node-a", ELFBuildID: "sha256:test", HeartbeatNS: 1, HeartbeatTimeoutNS: 5})
@@ -59,15 +83,18 @@ func dynamicTestConfig() config.AgentConfiguration {
 func TestDynamicRuntimeStartsKubernetesControlChain(t *testing.T) {
 	sources := controlplane.Sources{Preflight: dynamicObserverPreflight{}, Flannel: dynamicObserverFlannel{}, Endpoints: dynamicObserverEndpoints{}, Pins: dynamicObserverPins{}, TC: dynamicObserverTC{}, Rules: dynamicObserverRules{}}
 	events := []string{}
+	cfg := dynamicTestConfig()
+	cfg.Heartbeat.Interval = config.Duration(10 * time.Millisecond)
+	control := &dynamicRuntimeHeartbeatControl{localHandlerControl: &localHandlerControl{events: &events}}
 	factory := func(context.Context, datapathComponentConfig) (*datapathComponents, error) {
 		return &datapathComponents{
 			cri: &fakeCloser{}, endpointResolver: &localHandlerResolver{endpoint: handlerEndpoint("unused"), events: &events}, sources: sources,
 			tc: dynamicRuntimeTC{}, mapWriter: dynamicRuntimeMaps{}, ownership: &deleteOwnership{state: reconcile.OwnershipState{SchemaVersion: 1, InstallationID: "install", NodeUID: "node-a"}},
-			control: &localHandlerControl{events: &events}, endpoint: &localHandlerEndpoint{events: &events}, maps: &localHandlerMaps{events: &events}, publisher: dynamicRuntimePublisher(t),
+			control: control, endpoint: &localHandlerEndpoint{events: &events}, maps: &localHandlerMaps{events: &events}, publisher: dynamicRuntimePublisher(t),
 		}, nil
 	}
 	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a", UID: types.UID("node-a")}}
-	runtime, err := newDynamicRuntimeWithFactory(dynamicTestConfig(), fake.NewSimpleClientset(node), factory)
+	runtime, err := newDynamicRuntimeWithFactory(cfg, fake.NewSimpleClientset(node), factory)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,6 +115,13 @@ func TestDynamicRuntimeStartsKubernetesControlChain(t *testing.T) {
 	if runtime.AgentState() != reconcile.AgentReady {
 		t.Fatalf("agent state = %s, want %s", runtime.AgentState(), reconcile.AgentReady)
 	}
+	deadline = time.Now().Add(time.Second)
+	for control.HeartbeatCount() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if control.HeartbeatCount() == 0 {
+		t.Fatal("dynamic runtime did not start heartbeat refresh")
+	}
 	cancel()
 	select {
 	case err := <-done:
@@ -100,8 +134,44 @@ func TestDynamicRuntimeStartsKubernetesControlChain(t *testing.T) {
 	if runtime.AgentState() != reconcile.AgentStopping {
 		t.Fatalf("agent state after stop = %s, want %s", runtime.AgentState(), reconcile.AgentStopping)
 	}
+	heartbeats := control.HeartbeatCount()
+	time.Sleep(20 * time.Millisecond)
+	if control.HeartbeatCount() != heartbeats {
+		t.Fatalf("heartbeat continued after runtime stop: before=%d after=%d", heartbeats, control.HeartbeatCount())
+	}
 	if err := runtime.Run(context.Background()); err == nil {
 		t.Fatal("restarting a stopped runtime unexpectedly succeeded")
+	}
+}
+
+func TestDynamicRuntimeDegradesWhenHeartbeatFails(t *testing.T) {
+	sources := controlplane.Sources{Preflight: dynamicObserverPreflight{}, Flannel: dynamicObserverFlannel{}, Endpoints: dynamicObserverEndpoints{}, Pins: dynamicObserverPins{}, TC: dynamicObserverTC{}, Rules: dynamicObserverRules{}}
+	events := []string{}
+	wantErr := errors.New("heartbeat map unavailable")
+	control := &dynamicRuntimeHeartbeatControl{localHandlerControl: &localHandlerControl{events: &events}, refreshErr: wantErr}
+	cfg := dynamicTestConfig()
+	cfg.Heartbeat.Interval = config.Duration(10 * time.Millisecond)
+	factory := func(context.Context, datapathComponentConfig) (*datapathComponents, error) {
+		return &datapathComponents{
+			cri: &fakeCloser{}, endpointResolver: &localHandlerResolver{endpoint: handlerEndpoint("unused"), events: &events}, sources: sources,
+			tc: dynamicRuntimeTC{}, mapWriter: dynamicRuntimeMaps{}, ownership: &deleteOwnership{state: reconcile.OwnershipState{SchemaVersion: 1, InstallationID: "install", NodeUID: "node-a"}},
+			control: control, endpoint: &localHandlerEndpoint{events: &events}, maps: &localHandlerMaps{events: &events}, publisher: dynamicRuntimePublisher(t),
+		}, nil
+	}
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a", UID: types.UID("node-a")}}
+	runtime, err := newDynamicRuntimeWithFactory(cfg, fake.NewSimpleClientset(node), factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = runtime.Run(context.Background())
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Run error = %v, want %v", err, wantErr)
+	}
+	if runtime.AgentState() != reconcile.AgentDegraded {
+		t.Fatalf("agent state = %s, want %s", runtime.AgentState(), reconcile.AgentDegraded)
+	}
+	if len(events) == 0 || events[len(events)-1] != "disable" {
+		t.Fatalf("heartbeat failure did not disable fast path: events=%v", events)
 	}
 }
 
