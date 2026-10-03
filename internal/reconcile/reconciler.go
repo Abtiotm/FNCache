@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
 )
 
 // ReconcileBackend keeps orchestration independent from kernel and runtime APIs.
@@ -25,24 +24,20 @@ type Reconciler interface {
 }
 
 type Coordinator struct {
-	backend ReconcileBackend
-	gate    chan struct{}
-
-	stateMu sync.RWMutex
-	state   AgentState
+	backend   ReconcileBackend
+	gate      chan struct{}
+	lifecycle *AgentStateMachine
 }
 
 func NewCoordinator(backend ReconcileBackend) (*Coordinator, error) {
 	if backend == nil {
 		return nil, fmt.Errorf("reconcile backend is required")
 	}
-	return &Coordinator{backend: backend, gate: make(chan struct{}, 1), state: AgentBootstrapping}, nil
+	return &Coordinator{backend: backend, gate: make(chan struct{}, 1), lifecycle: NewAgentStateMachine()}, nil
 }
 
 func (c *Coordinator) State() AgentState {
-	c.stateMu.RLock()
-	defer c.stateMu.RUnlock()
-	return c.state
+	return c.lifecycle.State()
 }
 
 func (c *Coordinator) FullReconcile(ctx context.Context) (ReconcileResult, error) {
@@ -185,11 +180,5 @@ func (c *Coordinator) fail(result ReconcileResult, err error, disableConfirmed b
 }
 
 func (c *Coordinator) transitionTo(state AgentState) error {
-	c.stateMu.Lock()
-	defer c.stateMu.Unlock()
-	if err := validateStateTransition(c.state, state); err != nil {
-		return err
-	}
-	c.state = state
-	return nil
+	return c.lifecycle.Transition(state)
 }

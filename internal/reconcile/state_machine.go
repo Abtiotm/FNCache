@@ -3,6 +3,7 @@ package reconcile
 import (
 	"errors"
 	"fmt"
+	"sync"
 )
 
 var ErrInvalidStateTransition = errors.New("invalid agent state transition")
@@ -34,4 +35,31 @@ func validateStateTransition(from, to AgentState) error {
 		return nil
 	}
 	return fmt.Errorf("%w: %s -> %s", ErrInvalidStateTransition, from, to)
+}
+
+// AgentStateMachine owns the lifecycle state shared by static and dynamic
+// runtimes. All transitions are validated and published atomically.
+type AgentStateMachine struct {
+	mu    sync.RWMutex
+	state AgentState
+}
+
+func NewAgentStateMachine() *AgentStateMachine {
+	return &AgentStateMachine{state: AgentBootstrapping}
+}
+
+func (m *AgentStateMachine) State() AgentState {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.state
+}
+
+func (m *AgentStateMachine) Transition(to AgentState) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := validateStateTransition(m.state, to); err != nil {
+		return err
+	}
+	m.state = to
+	return nil
 }

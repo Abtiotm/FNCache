@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"time"
@@ -26,6 +27,7 @@ type DynamicRuntime struct {
 	resync     *kube.ResyncScheduler
 	queue      *queue.Queue
 	barrier    *reconcile.CoordinationBarrier
+	lifecycle  *reconcile.AgentStateMachine
 	factory    datapathComponentFactory
 	components *datapathComponents
 	observer   *DynamicObserver
@@ -86,14 +88,23 @@ func newDynamicRuntimeWithFactory(cfg config.AgentConfiguration, client kubernet
 	if err != nil {
 		return nil, err
 	}
-	return &DynamicRuntime{config: cfg, store: store, source: source, bootstrap: bootstrap, resync: resync, queue: target, barrier: reconcile.NewCoordinationBarrier(), factory: factory}, nil
+	return &DynamicRuntime{config: cfg, store: store, source: source, bootstrap: bootstrap, resync: resync, queue: target, barrier: reconcile.NewCoordinationBarrier(), lifecycle: reconcile.NewAgentStateMachine(), factory: factory}, nil
 }
 
 func (r *DynamicRuntime) Run(ctx context.Context) error {
 	if err := r.bootstrap.Start(ctx); err != nil {
+		if transitionErr := r.lifecycle.Transition(reconcile.AgentDisabled); transitionErr != nil {
+			return errors.Join(err, transitionErr)
+		}
+		return err
+	}
+	if err := r.lifecycle.Transition(reconcile.AgentReconciling); err != nil {
 		return err
 	}
 	if err := r.initializeDatapath(ctx); err != nil {
+		if transitionErr := r.lifecycle.Transition(reconcile.AgentDisabled); transitionErr != nil {
+			return errors.Join(err, transitionErr)
+		}
 		return err
 	}
 	go r.resync.Run(ctx)
@@ -102,16 +113,25 @@ func (r *DynamicRuntime) Run(ctx context.Context) error {
 		r.worker.Run(ctx)
 		close(workerDone)
 	}()
+	if err := r.lifecycle.Transition(reconcile.AgentReady); err != nil {
+		r.queue.ShutDown()
+		<-workerDone
+		_ = r.components.Close()
+		return err
+	}
 	<-ctx.Done()
+	stopErr := r.lifecycle.Transition(reconcile.AgentStopping)
 	r.queue.ShutDown()
 	<-workerDone
 	if r.components != nil {
-		return r.components.Close()
+		return errors.Join(stopErr, r.components.Close())
 	}
-	return nil
+	return stopErr
 }
 
 func (r *DynamicRuntime) State() KubeBootstrapState { return r.bootstrap.State() }
+
+func (r *DynamicRuntime) AgentState() reconcile.AgentState { return r.lifecycle.State() }
 
 func (r *DynamicRuntime) initializeDatapath(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {

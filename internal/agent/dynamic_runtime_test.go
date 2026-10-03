@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -80,6 +81,13 @@ func TestDynamicRuntimeStartsKubernetesControlChain(t *testing.T) {
 	if runtime.State() != KubeBootstrapReady {
 		t.Fatalf("dynamic runtime state = %s", runtime.State())
 	}
+	deadline = time.Now().Add(time.Second)
+	for runtime.AgentState() != reconcile.AgentReady && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if runtime.AgentState() != reconcile.AgentReady {
+		t.Fatalf("agent state = %s, want %s", runtime.AgentState(), reconcile.AgentReady)
+	}
 	cancel()
 	select {
 	case err := <-done:
@@ -88,6 +96,31 @@ func TestDynamicRuntimeStartsKubernetesControlChain(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("dynamic runtime did not stop")
+	}
+	if runtime.AgentState() != reconcile.AgentStopping {
+		t.Fatalf("agent state after stop = %s, want %s", runtime.AgentState(), reconcile.AgentStopping)
+	}
+	if err := runtime.Run(context.Background()); err == nil {
+		t.Fatal("restarting a stopped runtime unexpectedly succeeded")
+	}
+}
+
+func TestDynamicRuntimeDisablesAfterDatapathInitializationFailure(t *testing.T) {
+	wantErr := errors.New("datapath unavailable")
+	factory := func(context.Context, datapathComponentConfig) (*datapathComponents, error) {
+		return nil, wantErr
+	}
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a", UID: types.UID("node-a")}}
+	runtime, err := newDynamicRuntimeWithFactory(dynamicTestConfig(), fake.NewSimpleClientset(node), factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = runtime.Run(context.Background())
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Run error = %v, want %v", err, wantErr)
+	}
+	if runtime.AgentState() != reconcile.AgentDisabled {
+		t.Fatalf("agent state = %s, want %s", runtime.AgentState(), reconcile.AgentDisabled)
 	}
 }
 
