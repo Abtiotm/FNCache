@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/cat-cc-Lcos/FNCache/internal/controlplane"
 	"github.com/cat-cc-Lcos/FNCache/internal/discovery"
 	"github.com/cat-cc-Lcos/FNCache/internal/kube"
 	"github.com/cat-cc-Lcos/FNCache/internal/reconcile"
@@ -52,6 +53,34 @@ type localHandlerControl struct{ events *[]string }
 func (c *localHandlerControl) Disable(context.Context) error {
 	*c.events = append(*c.events, "disable")
 	return nil
+}
+
+type localHandlerGeneration struct {
+	control   localControl
+	scanner   localStateScanner
+	publisher localPublisher
+}
+
+func (g *localHandlerGeneration) Execute(ctx context.Context, desired reconcile.DesiredState, mutate controlplane.GenerationMutator) error {
+	if err := g.control.Disable(ctx); err != nil {
+		return err
+	}
+	actual, err := g.scanner.Scan(ctx)
+	if err != nil {
+		return err
+	}
+	if err := mutate(ctx, desired, actual); err != nil {
+		return err
+	}
+	actual, err = g.scanner.Scan(ctx)
+	if err != nil {
+		return err
+	}
+	return g.publisher.CommitAndPublish(ctx, desired, actual)
+}
+
+func testLocalGeneration(control localControl, scanner localStateScanner, publisher localPublisher) localGenerationTransaction {
+	return &localHandlerGeneration{control: control, scanner: scanner, publisher: publisher}
 }
 
 type localHandlerEndpoint struct{ events *[]string }
@@ -116,7 +145,9 @@ func TestLocalEndpointHandlerCreatesAndPublishesEndpoint(t *testing.T) {
 	}
 	base := reconcile.DesiredState{Enabled: true, Capability: discovery.CapabilityReport{Supported: true}, LocalEndpoints: map[string]resolver.Endpoint{"pod-old": handlerEndpoint("pod-old")}}
 	publisher := &localHandlerPublisher{events: &events}
-	handler, err := NewLocalEndpointHandler(LocalEndpointHandlerConfig{Store: store, Resolver: &localHandlerResolver{endpoint: handlerEndpoint("pod-1"), events: &events}, LocalNode: "node-a", Desired: &localHandlerDesired{desired: base, events: &events}, Scanner: &localHandlerScanner{events: &events}, Control: &localHandlerControl{events: &events}, Endpoint: &localHandlerEndpoint{events: &events}, Maps: &localHandlerMaps{events: &events}, Remover: localHandlerRemover{}, Publisher: publisher})
+	control := &localHandlerControl{events: &events}
+	scanner := &localHandlerScanner{events: &events}
+	handler, err := NewLocalEndpointHandler(LocalEndpointHandlerConfig{Store: store, Resolver: &localHandlerResolver{endpoint: handlerEndpoint("pod-1"), events: &events}, LocalNode: "node-a", Desired: &localHandlerDesired{desired: base, events: &events}, Scanner: scanner, Control: control, Endpoint: &localHandlerEndpoint{events: &events}, Maps: &localHandlerMaps{events: &events}, Remover: localHandlerRemover{}, Publisher: publisher, Generation: testLocalGeneration(control, scanner, publisher)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +168,10 @@ func TestLocalEndpointHandlerClassifiesNotReadyAndSkipsInvalidPod(t *testing.T) 
 	pod := handlerPod()
 	_ = store.UpsertPod(pod)
 	events := []string{}
-	handler, _ := NewLocalEndpointHandler(LocalEndpointHandlerConfig{Store: store, Resolver: &localHandlerResolver{err: resolver.ErrEndpointNotReady, events: &events}, LocalNode: "node-a", Desired: &localHandlerDesired{events: &events}, Scanner: &localHandlerScanner{events: &events}, Control: &localHandlerControl{events: &events}, Endpoint: &localHandlerEndpoint{events: &events}, Maps: &localHandlerMaps{events: &events}, Remover: localHandlerRemover{}, Publisher: &localHandlerPublisher{events: &events}})
+	control := &localHandlerControl{events: &events}
+	scanner := &localHandlerScanner{events: &events}
+	publisher := &localHandlerPublisher{events: &events}
+	handler, _ := NewLocalEndpointHandler(LocalEndpointHandlerConfig{Store: store, Resolver: &localHandlerResolver{err: resolver.ErrEndpointNotReady, events: &events}, LocalNode: "node-a", Desired: &localHandlerDesired{events: &events}, Scanner: scanner, Control: control, Endpoint: &localHandlerEndpoint{events: &events}, Maps: &localHandlerMaps{events: &events}, Remover: localHandlerRemover{}, Publisher: publisher, Generation: testLocalGeneration(control, scanner, publisher)})
 	err := handler.Handle(context.Background(), reconcile.ReconcileKey{Kind: reconcile.ReconcileLocalEndpoint, UID: "pod-1"})
 	var classified *reconcile.ClassifiedError
 	if !errors.As(err, &classified) || classified.Class() != reconcile.ErrorRetryable || len(events) != 1 {
@@ -170,10 +204,12 @@ func TestLocalEndpointHandlerCleansSameUIDIdentityChange(t *testing.T) {
 	events := []string{}
 	remover := &recordingLocalHandlerRemover{}
 	scanner := &localHandlerScanner{events: &events}
+	control := &localHandlerControl{events: &events}
+	publisher := &localHandlerPublisher{events: &events}
 	handler, err := NewLocalEndpointHandler(LocalEndpointHandlerConfig{
 		Store: store, Resolver: &localHandlerResolver{endpoint: current, events: &events}, LocalNode: "node-a",
 		Desired: &localHandlerDesired{desired: reconcile.DesiredState{Enabled: true, Capability: discovery.CapabilityReport{Supported: true}, LocalEndpoints: map[string]resolver.Endpoint{"pod-1": old}}, events: &events},
-		Scanner: scanner, Control: &localHandlerControl{events: &events}, Endpoint: &localHandlerEndpoint{events: &events}, Maps: &localHandlerMaps{events: &events}, Remover: remover, Publisher: &localHandlerPublisher{events: &events},
+		Scanner: scanner, Control: control, Endpoint: &localHandlerEndpoint{events: &events}, Maps: &localHandlerMaps{events: &events}, Remover: remover, Publisher: publisher, Generation: testLocalGeneration(control, scanner, publisher),
 	})
 	if err != nil {
 		t.Fatal(err)
