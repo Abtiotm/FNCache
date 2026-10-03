@@ -2,6 +2,7 @@ package reconcile
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 )
@@ -19,6 +20,7 @@ type ReconcileBackend interface {
 
 type Reconciler interface {
 	FullReconcile(context.Context) (ReconcileResult, error)
+	Stop(context.Context) error
 	State() AgentState
 }
 
@@ -55,7 +57,10 @@ func (c *Coordinator) FullReconcile(ctx context.Context) (ReconcileResult, error
 		return result, ctx.Err()
 	}
 
-	c.setState(AgentReconciling)
+	if err := c.transitionTo(AgentReconciling); err != nil {
+		result.State = c.State()
+		return result, err
+	}
 	result.State = AgentReconciling
 	if err := c.runStage(ctx, &result, "disable", func() error { return c.backend.Disable(ctx) }); err != nil {
 		return c.fail(result, err, false)
@@ -66,7 +71,10 @@ func (c *Coordinator) FullReconcile(ctx context.Context) (ReconcileResult, error
 	}
 	if !desired.Enabled {
 		result.Generation = desired.Generation
-		c.setState(AgentDisabled)
+		if err := c.transitionTo(AgentDisabled); err != nil {
+			result.State = c.State()
+			return result, err
+		}
 		result.State = AgentDisabled
 		return result, nil
 	}
@@ -96,9 +104,31 @@ func (c *Coordinator) FullReconcile(ctx context.Context) (ReconcileResult, error
 
 	result.Generation = desired.Generation
 	result.Changed = changed
-	c.setState(AgentReady)
+	if err := c.transitionTo(AgentReady); err != nil {
+		result.State = c.State()
+		return result, err
+	}
 	result.State = AgentReady
 	return result, nil
+}
+
+// Stop serializes shutdown with an in-flight reconciliation and moves a
+// healthy or degraded agent into the terminal Stopping state.
+func (c *Coordinator) Stop(ctx context.Context) error {
+	if ctx == nil {
+		return fmt.Errorf("stop context is required")
+	}
+	select {
+	case c.gate <- struct{}{}:
+		defer func() { <-c.gate }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	if c.State() == AgentStopping {
+		return nil
+	}
+	return c.transitionTo(AgentStopping)
 }
 
 func (c *Coordinator) discover(ctx context.Context, result *ReconcileResult) (DesiredState, error) {
@@ -146,13 +176,20 @@ func (c *Coordinator) fail(result ReconcileResult, err error, disableConfirmed b
 	if disableConfirmed {
 		state = AgentDisabled
 	}
-	c.setState(state)
+	if transitionErr := c.transitionTo(state); transitionErr != nil {
+		result.State = c.State()
+		return result, errors.Join(err, transitionErr)
+	}
 	result.State = state
 	return result, err
 }
 
-func (c *Coordinator) setState(state AgentState) {
+func (c *Coordinator) transitionTo(state AgentState) error {
 	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	if err := validateStateTransition(c.state, state); err != nil {
+		return err
+	}
 	c.state = state
-	c.stateMu.Unlock()
+	return nil
 }
