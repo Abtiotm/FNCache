@@ -190,24 +190,35 @@ func (r *DynamicRuntime) Run(ctx context.Context) error {
 			stopped = true
 		}
 	}
+	shutdownTimeout := time.Duration(r.config.Heartbeat.Timeout) + time.Second
+	shutdownWaiter, waiterErr := NewShutdownWaiter(shutdownTimeout)
+	if waiterErr != nil {
+		return errors.Join(runErr, stopErr, waiterErr)
+	}
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer shutdownCancel()
+	var shutdownErr error
 	if !heartbeatObserved {
-		<-heartbeatDone
+		shutdownErr = errors.Join(shutdownErr, shutdownWaiter.WaitError(shutdownCtx, heartbeatDone))
 	}
-	for range scanResults {
-	}
+	shutdownErr = errors.Join(shutdownErr, shutdownWaiter.Drain(shutdownCtx, scanResults))
 	r.queue.ShutDown()
-	<-workerDone
-	if failureErr != nil {
+	shutdownErr = errors.Join(shutdownErr, shutdownWaiter.Wait(shutdownCtx, workerDone))
+	if failureErr != nil && shutdownErr == nil {
 		disableCtx, disableCancel := context.WithTimeout(context.Background(), time.Duration(r.config.Heartbeat.Timeout))
 		disableErr := r.components.control.Disable(disableCtx)
 		disableCancel()
 		degradedErr := r.lifecycle.Transition(reconcile.AgentDegraded)
 		runErr = errors.Join(failureErr, disableErr, degradedErr)
 	}
-	if r.components != nil {
-		return errors.Join(runErr, stopErr, r.components.Close())
+	var closeErr error
+	if r.components != nil && shutdownErr == nil {
+		closeErr = shutdownWaiter.Close(shutdownCtx, r.components.Close)
 	}
-	return errors.Join(runErr, stopErr)
+	if r.components != nil {
+		return errors.Join(runErr, stopErr, shutdownErr, closeErr)
+	}
+	return errors.Join(runErr, stopErr, shutdownErr)
 }
 
 func (r *DynamicRuntime) State() KubeBootstrapState { return r.bootstrap.State() }
