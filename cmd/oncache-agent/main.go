@@ -2,15 +2,18 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/cat-cc-Lcos/FNCache/internal/agent"
 	"github.com/cat-cc-Lcos/FNCache/internal/logging"
 	"github.com/cat-cc-Lcos/FNCache/internal/reconcile"
+	"github.com/cat-cc-Lcos/FNCache/internal/server"
 )
 
 func main() {
@@ -45,7 +48,17 @@ func runDynamic(path string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return runtime.Run(ctx)
+	httpServer, err := server.New(server.Config{ListenAddress: runtime.HTTPAddress(), DebugState: runtime.DebugStateEnabled()}, runtime)
+	if err != nil {
+		return fmt.Errorf("create HTTP server: %w", err)
+	}
+	if err := httpServer.Start(); err != nil {
+		return fmt.Errorf("start HTTP server: %w", err)
+	}
+	runErr := runtime.Run(ctx)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return errors.Join(runErr, httpServer.Close(shutdownCtx))
 }
 
 func run(path string) (err error) {
