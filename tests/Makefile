@@ -86,3 +86,4 @@ clean:
 	rm -f "$(TARGET)" "$(BEHAVIOR_TARGET)"
 
 -include Makefile.m3e2e
+-include Makefile.m4e2e

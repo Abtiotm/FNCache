@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"k8s.io/client-go/kubernetes"
@@ -117,6 +118,14 @@ func (r *DynamicRuntime) Run(ctx context.Context) error {
 		}
 		return err
 	}
+	if err := r.reconcileInitial(ctx); err != nil {
+		if transitionErr := r.lifecycle.Transition(reconcile.AgentDisabled); transitionErr != nil {
+			_ = r.components.Close()
+			return errors.Join(err, transitionErr)
+		}
+		_ = r.components.Close()
+		return err
+	}
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go r.resync.Run(runCtx)
@@ -140,6 +149,7 @@ func (r *DynamicRuntime) Run(ctx context.Context) error {
 	_ = r.scanScheduler.Trigger(ScanFull)
 	var failureErr error
 	var runErr, stopErr error
+	stoppingRequested := false
 	stopped := false
 	for !stopped {
 		select {
@@ -147,6 +157,7 @@ func (r *DynamicRuntime) Run(ctx context.Context) error {
 			heartbeatObserved = true
 			if ctx.Err() != nil {
 				r.healthEpoch.Invalidate()
+				stoppingRequested = true
 				stopErr = r.lifecycle.Transition(reconcile.AgentStopping)
 			} else {
 				r.healthEpoch.Invalidate()
@@ -184,6 +195,7 @@ func (r *DynamicRuntime) Run(ctx context.Context) error {
 			}
 		case <-ctx.Done():
 			r.healthEpoch.Invalidate()
+			stoppingRequested = true
 			stopErr = r.lifecycle.Transition(reconcile.AgentStopping)
 			cancel()
 			r.queue.ShutDown()
@@ -204,6 +216,9 @@ func (r *DynamicRuntime) Run(ctx context.Context) error {
 	shutdownErr = errors.Join(shutdownErr, shutdownWaiter.Drain(shutdownCtx, scanResults))
 	r.queue.ShutDown()
 	shutdownErr = errors.Join(shutdownErr, shutdownWaiter.Wait(shutdownCtx, workerDone))
+	if stoppingRequested && shutdownErr == nil {
+		shutdownErr = errors.Join(shutdownErr, r.disableFastPathForShutdown())
+	}
 	if failureErr != nil && shutdownErr == nil {
 		disableCtx, disableCancel := context.WithTimeout(context.Background(), time.Duration(r.config.Heartbeat.Timeout))
 		disableErr := r.components.control.Disable(disableCtx)
@@ -219,6 +234,89 @@ func (r *DynamicRuntime) Run(ctx context.Context) error {
 		return errors.Join(runErr, stopErr, shutdownErr, closeErr)
 	}
 	return errors.Join(runErr, stopErr, shutdownErr)
+}
+
+func (r *DynamicRuntime) disableFastPathForShutdown() error {
+	if r.components == nil || r.components.control == nil {
+		return nil
+	}
+	timeout := time.Duration(r.config.Heartbeat.Timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if err := r.components.control.Disable(ctx); err != nil {
+		return fmt.Errorf("disable fast path during shutdown: %w", err)
+	}
+	return nil
+}
+
+func (r *DynamicRuntime) reconcileInitial(ctx context.Context) error {
+	if err := r.components.control.Disable(ctx); err != nil {
+		return fmt.Errorf("disable before initial discovery: %w", err)
+	}
+	desired, err := r.observer.Discover(ctx)
+	if err != nil {
+		return fmt.Errorf("initial discovery: %w", err)
+	}
+	if !desired.Enabled {
+		return fmt.Errorf("initial discovery disabled: %s", formatCapabilityReasons(desired.Capability.Reasons))
+	}
+	remover, err := controlplane.NewEndpointRemover(r.components.mapWriter, r.components.tc)
+	if err != nil {
+		return fmt.Errorf("create initial endpoint remover: %w", err)
+	}
+	backend, err := controlplane.NewFirstPassBackend(controlplane.FirstPassBackendConfig{
+		Observer: initialObservationBackend{observer: r.observer, desired: desired}, Control: r.components.control, Collection: r.components.collection,
+		Marker: r.components.marker, Base: r.components.base, Endpoint: r.components.endpoint,
+		Maps: r.components.maps, Ownership: r.components.ownership, Remover: remover,
+		Publisher: r.components.publisher,
+	})
+	if err != nil {
+		return fmt.Errorf("create initial reconciliation backend: %w", err)
+	}
+	coordinator, err := reconcile.NewCoordinator(backend)
+	if err != nil {
+		return fmt.Errorf("create initial reconciliation coordinator: %w", err)
+	}
+	result, err := coordinator.FullReconcile(ctx)
+	if err != nil {
+		return fmt.Errorf("initial full reconciliation: %w", err)
+	}
+	if result.State != reconcile.AgentReady {
+		return fmt.Errorf("initial full reconciliation ended in %s", result.State)
+	}
+	return nil
+}
+
+type initialObservationBackend struct {
+	observer *DynamicObserver
+	desired  reconcile.DesiredState
+}
+
+func (o initialObservationBackend) Discover(context.Context) (reconcile.DesiredState, error) {
+	return o.desired, nil
+}
+
+func (o initialObservationBackend) Scan(ctx context.Context) (reconcile.ActualState, error) {
+	return o.observer.Scan(ctx)
+}
+
+func formatCapabilityReasons(reasons []discovery.Reason) string {
+	if len(reasons) == 0 {
+		return "no capability reason reported"
+	}
+	parts := make([]string, 0, len(reasons))
+	for _, reason := range reasons {
+		if reason.Code == "" {
+			parts = append(parts, reason.Message)
+			continue
+		}
+		if reason.Message == "" {
+			parts = append(parts, reason.Code)
+			continue
+		}
+		parts = append(parts, reason.Code+": "+reason.Message)
+	}
+	return strings.Join(parts, "; ")
 }
 
 func (r *DynamicRuntime) State() KubeBootstrapState { return r.bootstrap.State() }

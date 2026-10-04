@@ -3,6 +3,7 @@ package datapath
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -232,7 +233,7 @@ func TestControlWriterRefreshHeartbeatRejectsInvalidState(t *testing.T) {
 		want      string
 	}{
 		{name: "ABI mismatch", value: ControlV1{ABIVersion: 2}, want: "ABI mismatch"},
-		{name: "disabled", value: ControlV1{ABIVersion: 1}, want: "cannot refresh disabled"},
+		{name: "disabled", value: ControlV1{ABIVersion: 1}, want: "control Map is not ready"},
 		{name: "lookup failure", lookupErr: errors.New("lookup failed"), want: "read control Map"},
 		{name: "update failure", value: ControlV1{ABIVersion: 1, Enabled: 1}, updateErr: errors.New("update failed"), want: "refresh heartbeat"},
 	}
@@ -247,6 +248,16 @@ func TestControlWriterRefreshHeartbeatRejectsInvalidState(t *testing.T) {
 				t.Fatalf("unexpected heartbeat refresh error: %v", err)
 			}
 		})
+	}
+}
+
+func TestControlWriterRefreshHeartbeatClassifiesMissingMap(t *testing.T) {
+	writer, err := newControlWriter(t.TempDir(), func(string) (controlMap, error) { return nil, os.ErrNotExist })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.RefreshHeartbeat(context.Background(), 900); !errors.Is(err, ErrControlMapNotReady) {
+		t.Fatalf("error = %v, want ErrControlMapNotReady", err)
 	}
 }
 

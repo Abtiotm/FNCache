@@ -13,7 +13,7 @@ agent:
   installationID: ""
 
 config:
-  runtimeEndpoint: unix:///run/containerd/containerd.sock
+  runtimeEndpoint: unix:///run/k3s/containerd/containerd.sock
   pinRoot: /sys/fs/bpf/oncache/v1
   stateDir: /var/lib/oncache/v1
   datapath:
@@ -64,12 +64,17 @@ security:
       - NET_ADMIN
       - SYS_ADMIN
 
+hostPID: true
+
 hostPaths:
   bpf: /sys/fs/bpf
+  boot: /boot
   run: /run
   proc: /proc
   state: /var/lib/oncache
   flannel: /run/flannel
+  toolsBin: /opt/oncache/bin
+  toolsSbin: /opt/oncache/sbin
 
 resources: {}
 nodeSelector: {}

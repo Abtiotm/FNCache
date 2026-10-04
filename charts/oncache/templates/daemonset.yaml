@@ -21,6 +21,7 @@ spec:
     spec:
       serviceAccountName: {{ include "oncache.serviceAccountName" . }}
       hostNetwork: true
+      hostPID: {{ .Values.hostPID }}
       dnsPolicy: ClusterFirstWithHostNet
       terminationGracePeriodSeconds: 30
       nodeSelector:
@@ -46,6 +47,8 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            - name: PATH
+              value: /opt/oncache/bin:/opt/oncache/sbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
             - name: ONCACHE_CONFIG
               value: /etc/oncache/agent.yaml
             - name: ONCACHE_INSTALLATION_ID
@@ -63,6 +66,9 @@ spec:
           volumeMounts:
             - name: bpf
               mountPath: /sys/fs/bpf
+            - name: boot
+              mountPath: /boot
+              readOnly: true
             - name: run
               mountPath: /run
             - name: proc
@@ -72,6 +78,12 @@ spec:
               mountPath: /var/lib/oncache
             - name: flannel
               mountPath: /run/flannel
+              readOnly: true
+            - name: tools-bin
+              mountPath: /opt/oncache/bin
+              readOnly: true
+            - name: tools-sbin
+              mountPath: /opt/oncache/sbin
               readOnly: true
             - name: config
               mountPath: /etc/oncache
@@ -93,6 +105,10 @@ spec:
           hostPath:
             path: {{ .Values.hostPaths.bpf }}
             type: Directory
+        - name: boot
+          hostPath:
+            path: {{ .Values.hostPaths.boot }}
+            type: Directory
         - name: run
           hostPath:
             path: {{ .Values.hostPaths.run }}
@@ -108,6 +124,14 @@ spec:
         - name: flannel
           hostPath:
             path: {{ .Values.hostPaths.flannel }}
+            type: Directory
+        - name: tools-bin
+          hostPath:
+            path: {{ .Values.hostPaths.toolsBin }}
+            type: Directory
+        - name: tools-sbin
+          hostPath:
+            path: {{ .Values.hostPaths.toolsSbin }}
             type: Directory
         - name: config
           configMap:

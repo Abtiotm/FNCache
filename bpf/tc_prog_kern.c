@@ -132,6 +132,14 @@ int tc_masq(struct __sk_buff *ctx) {
     if (!parse_ipv4_header(eth + 1, data_end, ip_available, &iphdr)) goto out;
     // Read for udp source port and policy check
     __u32 hash = bpf_get_hash_recalc(ctx);
+
+    // Only mark traffic addressed to a known remote Pod. Local, gateway and
+    // other unsupported IPv4 paths must remain untouched and use Flannel.
+    __be32 *nodeip_ = bpf_map_lookup_elem(&egressip_cache, &iphdr->daddr);
+    if (!nodeip_) {
+        oncache_stat_inc(ONCACHE_STAT_MASQ_EGRESSIP_MISS);
+        goto out;
+    }
 #ifdef ENABLENP
     ///////////////////////// Check for Policy /////////////////////////
     struct oncache_flow_v1 tuple_;
@@ -145,13 +153,6 @@ int tc_masq(struct __sk_buff *ctx) {
     }
 #endif
     ///////////////////////// Check for header cache ///////////////////////////////
-    __be32* nodeip_ = bpf_map_lookup_elem(&egressip_cache, &iphdr->daddr);
-    if (!nodeip_) {
-        oncache_stat_inc(ONCACHE_STAT_MASQ_EGRESSIP_MISS);
-        if (set_ip_tos(ctx, 0, ONCACHE_MISS_MASK) < 0) return TC_ACT_OK;
-        goto out;
-    } 
-
     // Use the nodeip to look up the egressinfo for masq
     struct oncache_egress_v1* egressinfo_ = bpf_map_lookup_elem(&egress_cache, nodeip_);
     if (!egressinfo_) {
@@ -184,8 +185,12 @@ int tc_masq(struct __sk_buff *ctx) {
         action = TC_ACT_SHOT;
         goto out;
     }
-    // Append the outer header
-    __builtin_memcpy(data, egressinfo_->outer_header, 64);
+    // Append the outer header through the helper so TC does not add a
+    // direct-write skb unclone prologue to the fallback path.
+    if (bpf_skb_store_bytes(ctx, 0, egressinfo_->outer_header, 64, 0) < 0) {
+        action = TC_ACT_SHOT;
+        goto out;
+    }
     if (set_new_length_outerhdr(ctx, ctx->len) < 0) {
         action = TC_ACT_SHOT;
         goto out;
@@ -237,6 +242,19 @@ int tc_restore(struct __sk_buff *ctx) {
         oncache_stat_inc(ONCACHE_STAT_RESTORE_OUTER_IP_MISMATCH);
         goto out;
     }
+
+    // Only mark traffic from a known remote Pod to a known local endpoint.
+    // Unknown and unsupported flows must remain untouched for Flannel.
+    if (!bpf_map_lookup_elem(&egressip_cache, &inner_iph->saddr)) {
+        oncache_stat_inc(ONCACHE_STAT_RESTORE_EGRESSIP_MISS);
+        goto out;
+    }
+    struct oncache_ingress_v1 *ingressinfo_ =
+        bpf_map_lookup_elem(&ingress_cache, &inner_iph->daddr);
+    if (!ingressinfo_ || ingressinfo_->src_mac[0] == 0x0) {
+        oncache_stat_inc(ONCACHE_STAT_RESTORE_POD_NOT_READY);
+        goto out;
+    }
     ///////////////////////// Policy Checking /////////////////////////
 #ifdef ENABLENP
     struct oncache_flow_v1 tuple_;
@@ -249,16 +267,6 @@ int tc_restore(struct __sk_buff *ctx) {
     }
 #endif
     ///////////////////////// Restore the Packet /////////////////////////
-    struct oncache_ingress_v1* ingressinfo_ = bpf_map_lookup_elem(&ingress_cache, &inner_iph->daddr);
-    if (!ingressinfo_ || ingressinfo_->src_mac[0] == 0x0) {
-        oncache_stat_inc(ONCACHE_STAT_RESTORE_POD_NOT_READY);
-        if (set_ip_tos(ctx, 50, ONCACHE_MISS_MASK) < 0) return TC_ACT_OK;
-        goto out;
-    }
-    if (!bpf_map_lookup_elem(&egressip_cache, &inner_iph->saddr)) {
-        oncache_stat_inc(ONCACHE_STAT_RESTORE_EGRESSIP_MISS);
-        goto out;
-    }
     if (!oncache_redirect_target_valid(ingressinfo_->ifindex, (__u32)ctx->ifindex)) {
         goto out;
     }
@@ -275,9 +283,11 @@ int tc_restore(struct __sk_buff *ctx) {
         goto out;
     }
     // Change MAC to masqed MAC
-    outer_eth = data;
-    __builtin_memcpy(outer_eth->h_dest, ingressinfo_->dst_mac, ETH_ALEN);
-    __builtin_memcpy(outer_eth->h_source, ingressinfo_->src_mac, ETH_ALEN);
+    if (bpf_skb_store_bytes(ctx, 0, ingressinfo_->dst_mac, ETH_ALEN, 0) < 0 ||
+        bpf_skb_store_bytes(ctx, ETH_ALEN, ingressinfo_->src_mac, ETH_ALEN, 0) < 0) {
+        action = TC_ACT_SHOT;
+        goto out;
+    }
     action = bpf_redirect(ingressinfo_->ifindex, 0);
     if (action != TC_ACT_REDIRECT) action = TC_ACT_SHOT;
 out:

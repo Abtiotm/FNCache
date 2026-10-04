@@ -2,7 +2,9 @@ package datapath
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"github.com/cat-cc-Lcos/FNCache/internal/reconcile"
@@ -10,6 +12,8 @@ import (
 )
 
 const controlMapABIVersion uint32 = 1
+
+var ErrControlMapNotReady = errors.New("control Map is not ready")
 
 type ControlV1 struct {
 	ABIVersion         uint32
@@ -100,6 +104,9 @@ func (w *ControlWriter) Initialize(ctx context.Context) error {
 	path := filepath.Join(w.pinRoot, "maps", "control_map")
 	control, err := w.open(path)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("%w: %v", ErrControlMapNotReady, err)
+		}
 		return fmt.Errorf("open control Map: %w", err)
 	}
 	defer func() { _ = control.Close() }()
@@ -166,6 +173,9 @@ func (w *ControlWriter) RefreshHeartbeat(ctx context.Context, heartbeatNS uint64
 	path := filepath.Join(w.pinRoot, "maps", "control_map")
 	control, err := w.open(path)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("%w: %v", ErrControlMapNotReady, err)
+		}
 		return fmt.Errorf("open control Map: %w", err)
 	}
 	defer func() { _ = control.Close() }()
@@ -182,7 +192,7 @@ func (w *ControlWriter) RefreshHeartbeat(ctx context.Context, heartbeatNS uint64
 		return fmt.Errorf("invalid control Map enabled value: %d", value.Enabled)
 	}
 	if value.Enabled == 0 {
-		return fmt.Errorf("cannot refresh disabled control Map")
+		return fmt.Errorf("%w: disabled", ErrControlMapNotReady)
 	}
 	value.HeartbeatNS = heartbeatNS
 	if err := control.Update(key, &value, ebpf.UpdateAny); err != nil {

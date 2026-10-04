@@ -2,10 +2,12 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
+	"github.com/cat-cc-Lcos/FNCache/internal/datapath"
 	"github.com/cat-cc-Lcos/FNCache/internal/reconcile"
 )
 
@@ -85,6 +87,9 @@ func (h *HeartbeatRefresher) Tick(ctx context.Context, epoch uint64) error {
 		return fmt.Errorf("read heartbeat clock: %w", err)
 	}
 	if err := h.control.RefreshHeartbeat(ctx, heartbeat); err != nil {
+		if errors.Is(err, datapath.ErrControlMapNotReady) {
+			return nil
+		}
 		return fmt.Errorf("refresh heartbeat: %w", err)
 	}
 	return nil

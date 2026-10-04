@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cat-cc-Lcos/FNCache/internal/datapath"
 	"github.com/cat-cc-Lcos/FNCache/internal/reconcile"
 )
 
@@ -81,6 +82,16 @@ func TestHeartbeatRefresherPropagatesRefreshFailure(t *testing.T) {
 	err := refresher.Tick(context.Background(), epoch.Snapshot())
 	if err == nil || !strings.Contains(err.Error(), "refresh heartbeat") {
 		t.Fatalf("unexpected refresh error: %v", err)
+	}
+}
+
+func TestHeartbeatRefresherWaitsForControlMap(t *testing.T) {
+	epoch := NewHealthEpoch()
+	state := reconcile.AgentReady
+	control := &fakeHeartbeatControl{err: datapath.ErrControlMapNotReady}
+	refresher := testHeartbeatRefresher(t, control, &state, epoch)
+	if err := refresher.Tick(context.Background(), epoch.Snapshot()); err != nil {
+		t.Fatalf("control Map not ready caused fatal heartbeat error: %v", err)
 	}
 }
 

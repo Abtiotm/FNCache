@@ -48,6 +48,10 @@ func (o *DynamicObserver) Desired(ctx context.Context) (reconcile.DesiredState, 
 	return kube.BuildDesiredState(snapshot, desired, o.config.NodeName, desired.LocalEndpoints)
 }
 
+func (o *DynamicObserver) Discover(ctx context.Context) (reconcile.DesiredState, error) {
+	return o.Desired(ctx)
+}
+
 func (o *DynamicObserver) Scan(ctx context.Context) (reconcile.ActualState, error) {
 	snapshot := o.store.Snapshot()
 	observer, err := o.buildObserver(ctx, snapshot)

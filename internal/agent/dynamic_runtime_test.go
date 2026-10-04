@@ -20,6 +20,7 @@ import (
 	"github.com/cat-cc-Lcos/FNCache/internal/datapath"
 	"github.com/cat-cc-Lcos/FNCache/internal/overlay/flannel"
 	"github.com/cat-cc-Lcos/FNCache/internal/reconcile"
+	"github.com/cat-cc-Lcos/FNCache/internal/resolver"
 )
 
 type dynamicRuntimeMaps struct{}
@@ -31,13 +32,65 @@ type dynamicRuntimeTC struct{}
 
 func (dynamicRuntimeTC) RemoveFilter(context.Context, datapath.TCFilterSpec) error { return nil }
 
+func (dynamicRuntimeTC) Scan(_ context.Context, links []resolver.LinkIdentity) (reconcile.ActualState, error) {
+	attachments := make([]reconcile.AttachmentState, 0, 4)
+	for _, link := range links {
+		switch link.IfIndex {
+		case 2:
+			attachments = append(attachments, dynamicRuntimeAttachment(link, "tc_init_e", 1), dynamicRuntimeAttachment(link, "tc_restore", 4))
+		case 7:
+			attachments = append(attachments, dynamicRuntimeAttachment(link, "tc_init_in", 2))
+		case 8:
+			attachments = append(attachments, dynamicRuntimeAttachment(link, "tc_masq", 3))
+		}
+	}
+	return reconcile.ActualState{Attachments: attachments}, nil
+}
+
+func dynamicRuntimeAttachment(link resolver.LinkIdentity, program string, programID uint32) reconcile.AttachmentState {
+	spec, _ := datapath.NewFixedFilter(link, program, programID, true)
+	return reconcile.AttachmentState{Link: spec.Link, Hook: string(spec.Hook), Program: spec.Program, Priority: spec.Priority, Handle: spec.Handle, ProgramID: spec.ProgramID}
+}
+
+type dynamicRuntimePins struct{}
+
+func (dynamicRuntimePins) Scan(context.Context) (reconcile.ActualState, error) {
+	schema := datapath.V1Schema()
+	programs := make(map[string]reconcile.ProgramState, len(schema.Programs))
+	for index, name := range schema.Programs {
+		programs[name] = reconcile.ProgramState{ID: uint32(index + 1), Name: name}
+	}
+	maps := make(map[string]reconcile.MapState, len(schema.Maps))
+	for index, expected := range schema.Maps {
+		maps[expected.Name] = reconcile.MapState{ID: uint32(index + 1), Name: expected.Name, KeySize: expected.KeySize, ValueSize: expected.ValueSize, MaxEntries: expected.MaxEntries}
+	}
+	return reconcile.ActualState{Control: reconcile.ControlState{Verified: true}, Programs: programs, Maps: maps}, nil
+}
+
+type dynamicRuntimeEnsurers struct{}
+
+func (dynamicRuntimeEnsurers) EnsureCollection(context.Context, reconcile.DesiredState, reconcile.ActualState) (bool, error) {
+	return true, nil
+}
+func (dynamicRuntimeEnsurers) EnsureMarker(context.Context, reconcile.DesiredState) (bool, error) {
+	return true, nil
+}
+func (dynamicRuntimeEnsurers) EnsureBase(context.Context, reconcile.DesiredState, reconcile.ActualState) (bool, error) {
+	return true, nil
+}
+
 type dynamicRuntimeCommitter struct{}
 
 func (dynamicRuntimeCommitter) Commit(context.Context, reconcile.OwnershipState) error { return nil }
 
-type dynamicRuntimePublisherControl struct{}
+type dynamicRuntimePublisherControl struct {
+	published *atomic.Bool
+}
 
-func (dynamicRuntimePublisherControl) Publish(context.Context, uint64, uint64, uint64, uint32) error {
+func (c dynamicRuntimePublisherControl) Publish(context.Context, uint64, uint64, uint64, uint32) error {
+	if c.published != nil {
+		c.published.Store(true)
+	}
 	return nil
 }
 
@@ -84,13 +137,23 @@ func (c *dynamicRuntimeHeartbeatControl) HeartbeatCount() int {
 	return len(c.heartbeats)
 }
 
-func dynamicRuntimePublisher(t *testing.T) *controlplane.Publisher {
+func dynamicRuntimePublisher(t *testing.T, published *atomic.Bool) *controlplane.Publisher {
 	t.Helper()
-	publisher, err := controlplane.NewPublisher(dynamicRuntimeCommitter{}, dynamicRuntimePublisherControl{}, controlplane.PublishConfig{InstallationID: "install", NodeUID: "node-a", ELFBuildID: "sha256:test", HeartbeatNS: 1, HeartbeatTimeoutNS: 5})
+	publisher, err := controlplane.NewPublisher(dynamicRuntimeCommitter{}, dynamicRuntimePublisherControl{published: published}, controlplane.PublishConfig{InstallationID: "install", NodeUID: "node-a", ELFBuildID: "sha256:test", HeartbeatNS: 1, HeartbeatTimeoutNS: 5})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return publisher
+}
+
+func dynamicRuntimeComponents(t *testing.T, sources controlplane.Sources, control localControl, events *[]string, published *atomic.Bool) *datapathComponents {
+	t.Helper()
+	return &datapathComponents{
+		cri: &fakeCloser{}, endpointResolver: &localHandlerResolver{endpoint: handlerEndpoint("unused"), events: events}, sources: sources,
+		tc: dynamicRuntimeTC{}, mapWriter: dynamicRuntimeMaps{}, ownership: &deleteOwnership{state: reconcile.OwnershipState{SchemaVersion: 1, InstallationID: "install", NodeUID: "node-a"}},
+		control: control, collection: dynamicRuntimeEnsurers{}, marker: dynamicRuntimeEnsurers{}, base: dynamicRuntimeEnsurers{},
+		endpoint: &localHandlerEndpoint{events: events}, maps: &localHandlerMaps{events: events}, publisher: dynamicRuntimePublisher(t, published),
+	}
 }
 
 func dynamicTestConfig() config.AgentConfiguration {
@@ -105,17 +168,14 @@ func dynamicTestConfig() config.AgentConfiguration {
 }
 
 func TestDynamicRuntimeStartsKubernetesControlChain(t *testing.T) {
-	sources := controlplane.Sources{Preflight: dynamicObserverPreflight{}, Flannel: dynamicObserverFlannel{}, Endpoints: dynamicObserverEndpoints{}, Pins: dynamicObserverPins{}, TC: dynamicObserverTC{}, Rules: dynamicObserverRules{}}
+	sources := controlplane.Sources{Preflight: dynamicObserverPreflight{}, Flannel: dynamicObserverFlannel{}, Endpoints: dynamicObserverEndpoints{}, Pins: dynamicRuntimePins{}, TC: dynamicRuntimeTC{}, Rules: dynamicObserverRules{}}
 	events := []string{}
+	published := &atomic.Bool{}
 	cfg := dynamicTestConfig()
 	cfg.Heartbeat.Interval = config.Duration(10 * time.Millisecond)
 	control := &dynamicRuntimeHeartbeatControl{localHandlerControl: &localHandlerControl{events: &events}}
 	factory := func(context.Context, datapathComponentConfig) (*datapathComponents, error) {
-		return &datapathComponents{
-			cri: &fakeCloser{}, endpointResolver: &localHandlerResolver{endpoint: handlerEndpoint("unused"), events: &events}, sources: sources,
-			tc: dynamicRuntimeTC{}, mapWriter: dynamicRuntimeMaps{}, ownership: &deleteOwnership{state: reconcile.OwnershipState{SchemaVersion: 1, InstallationID: "install", NodeUID: "node-a"}},
-			control: control, endpoint: &localHandlerEndpoint{events: &events}, maps: &localHandlerMaps{events: &events}, publisher: dynamicRuntimePublisher(t),
-		}, nil
+		return dynamicRuntimeComponents(t, sources, control, &events, published), nil
 	}
 	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a", UID: types.UID("node-a")}}
 	runtime, err := newDynamicRuntimeWithFactory(cfg, fake.NewSimpleClientset(node), factory)
@@ -139,6 +199,9 @@ func TestDynamicRuntimeStartsKubernetesControlChain(t *testing.T) {
 	if runtime.AgentState() != reconcile.AgentReady {
 		t.Fatalf("agent state = %s, want %s", runtime.AgentState(), reconcile.AgentReady)
 	}
+	if !published.Load() {
+		t.Fatal("initial full reconciliation did not publish control state")
+	}
 	deadline = time.Now().Add(time.Second)
 	for control.HeartbeatCount() == 0 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
@@ -158,6 +221,9 @@ func TestDynamicRuntimeStartsKubernetesControlChain(t *testing.T) {
 	if runtime.AgentState() != reconcile.AgentStopping {
 		t.Fatalf("agent state after stop = %s, want %s", runtime.AgentState(), reconcile.AgentStopping)
 	}
+	if len(events) == 0 || events[len(events)-1] != "disable" {
+		t.Fatalf("shutdown did not disable fast path: events=%v", events)
+	}
 	heartbeats := control.HeartbeatCount()
 	time.Sleep(20 * time.Millisecond)
 	if control.HeartbeatCount() != heartbeats {
@@ -169,18 +235,14 @@ func TestDynamicRuntimeStartsKubernetesControlChain(t *testing.T) {
 }
 
 func TestDynamicRuntimeDegradesWhenHeartbeatFails(t *testing.T) {
-	sources := controlplane.Sources{Preflight: dynamicObserverPreflight{}, Flannel: dynamicObserverFlannel{}, Endpoints: dynamicObserverEndpoints{}, Pins: dynamicObserverPins{}, TC: dynamicObserverTC{}, Rules: dynamicObserverRules{}}
+	sources := controlplane.Sources{Preflight: dynamicObserverPreflight{}, Flannel: dynamicObserverFlannel{}, Endpoints: dynamicObserverEndpoints{}, Pins: dynamicRuntimePins{}, TC: dynamicRuntimeTC{}, Rules: dynamicObserverRules{}}
 	events := []string{}
 	wantErr := errors.New("heartbeat map unavailable")
 	control := &dynamicRuntimeHeartbeatControl{localHandlerControl: &localHandlerControl{events: &events}, refreshErr: wantErr}
 	cfg := dynamicTestConfig()
 	cfg.Heartbeat.Interval = config.Duration(10 * time.Millisecond)
 	factory := func(context.Context, datapathComponentConfig) (*datapathComponents, error) {
-		return &datapathComponents{
-			cri: &fakeCloser{}, endpointResolver: &localHandlerResolver{endpoint: handlerEndpoint("unused"), events: &events}, sources: sources,
-			tc: dynamicRuntimeTC{}, mapWriter: dynamicRuntimeMaps{}, ownership: &deleteOwnership{state: reconcile.OwnershipState{SchemaVersion: 1, InstallationID: "install", NodeUID: "node-a"}},
-			control: control, endpoint: &localHandlerEndpoint{events: &events}, maps: &localHandlerMaps{events: &events}, publisher: dynamicRuntimePublisher(t),
-		}, nil
+		return dynamicRuntimeComponents(t, sources, control, &events, nil), nil
 	}
 	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a", UID: types.UID("node-a")}}
 	runtime, err := newDynamicRuntimeWithFactory(cfg, fake.NewSimpleClientset(node), factory)
@@ -200,7 +262,7 @@ func TestDynamicRuntimeDegradesWhenHeartbeatFails(t *testing.T) {
 }
 
 func TestDynamicRuntimeDegradesWhenKubernetesAPIStale(t *testing.T) {
-	sources := controlplane.Sources{Preflight: dynamicObserverPreflight{}, Flannel: dynamicObserverFlannel{}, Endpoints: dynamicObserverEndpoints{}, Pins: dynamicObserverPins{}, TC: dynamicObserverTC{}, Rules: dynamicObserverRules{}}
+	sources := controlplane.Sources{Preflight: dynamicObserverPreflight{}, Flannel: dynamicObserverFlannel{}, Endpoints: dynamicObserverEndpoints{}, Pins: dynamicRuntimePins{}, TC: dynamicRuntimeTC{}, Rules: dynamicObserverRules{}}
 	events := []string{}
 	control := &dynamicRuntimeHeartbeatControl{localHandlerControl: &localHandlerControl{events: &events}}
 	cfg := dynamicTestConfig()
@@ -219,11 +281,7 @@ func TestDynamicRuntimeDegradesWhenKubernetesAPIStale(t *testing.T) {
 		})
 	}
 	factory := func(context.Context, datapathComponentConfig) (*datapathComponents, error) {
-		return &datapathComponents{
-			cri: &fakeCloser{}, endpointResolver: &localHandlerResolver{endpoint: handlerEndpoint("unused"), events: &events}, sources: sources,
-			tc: dynamicRuntimeTC{}, mapWriter: dynamicRuntimeMaps{}, ownership: &deleteOwnership{state: reconcile.OwnershipState{SchemaVersion: 1, InstallationID: "install", NodeUID: "node-a"}},
-			control: control, endpoint: &localHandlerEndpoint{events: &events}, maps: &localHandlerMaps{events: &events}, publisher: dynamicRuntimePublisher(t),
-		}, nil
+		return dynamicRuntimeComponents(t, sources, control, &events, nil), nil
 	}
 	runtime, err := newDynamicRuntimeWithFactory(cfg, client, factory)
 	if err != nil {
@@ -263,13 +321,9 @@ func TestDynamicRuntimeDegradesWhenFlannelDrifts(t *testing.T) {
 	cfg.Health.Interval = config.Duration(10 * time.Millisecond)
 	cfg.Kube.MaxStaleness = config.Duration(30 * time.Millisecond)
 	var drift atomic.Bool
-	sources := controlplane.Sources{Preflight: dynamicObserverPreflight{}, Flannel: dynamicRuntimeFlannelHealth{drift: &drift}, Endpoints: dynamicObserverEndpoints{}, Pins: dynamicObserverPins{}, TC: dynamicObserverTC{}, Rules: dynamicObserverRules{}}
+	sources := controlplane.Sources{Preflight: dynamicObserverPreflight{}, Flannel: dynamicRuntimeFlannelHealth{drift: &drift}, Endpoints: dynamicObserverEndpoints{}, Pins: dynamicRuntimePins{}, TC: dynamicRuntimeTC{}, Rules: dynamicObserverRules{}}
 	factory := func(context.Context, datapathComponentConfig) (*datapathComponents, error) {
-		return &datapathComponents{
-			cri: &fakeCloser{}, endpointResolver: &localHandlerResolver{endpoint: handlerEndpoint("unused"), events: &events}, sources: sources,
-			tc: dynamicRuntimeTC{}, mapWriter: dynamicRuntimeMaps{}, ownership: &deleteOwnership{state: reconcile.OwnershipState{SchemaVersion: 1, InstallationID: "install", NodeUID: "node-a"}},
-			control: control, endpoint: &localHandlerEndpoint{events: &events}, maps: &localHandlerMaps{events: &events}, publisher: dynamicRuntimePublisher(t),
-		}, nil
+		return dynamicRuntimeComponents(t, sources, control, &events, nil), nil
 	}
 	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a", UID: types.UID("node-a")}}
 	runtime, err := newDynamicRuntimeWithFactory(cfg, fake.NewSimpleClientset(node), factory)
@@ -310,13 +364,9 @@ func TestDynamicRuntimeDegradesWhenMarkerRuleDrifts(t *testing.T) {
 	cfg.Health.Interval = config.Duration(10 * time.Millisecond)
 	cfg.Kube.MaxStaleness = config.Duration(30 * time.Millisecond)
 	var drift atomic.Bool
-	sources := controlplane.Sources{Preflight: dynamicObserverPreflight{}, Flannel: dynamicObserverFlannel{}, Endpoints: dynamicObserverEndpoints{}, Pins: dynamicObserverPins{}, TC: dynamicObserverTC{}, Rules: dynamicRuntimeMarkerHealth{drift: &drift}}
+	sources := controlplane.Sources{Preflight: dynamicObserverPreflight{}, Flannel: dynamicObserverFlannel{}, Endpoints: dynamicObserverEndpoints{}, Pins: dynamicRuntimePins{}, TC: dynamicRuntimeTC{}, Rules: dynamicRuntimeMarkerHealth{drift: &drift}}
 	factory := func(context.Context, datapathComponentConfig) (*datapathComponents, error) {
-		return &datapathComponents{
-			cri: &fakeCloser{}, endpointResolver: &localHandlerResolver{endpoint: handlerEndpoint("unused"), events: &events}, sources: sources,
-			tc: dynamicRuntimeTC{}, mapWriter: dynamicRuntimeMaps{}, ownership: &deleteOwnership{state: reconcile.OwnershipState{SchemaVersion: 1, InstallationID: "install", NodeUID: "node-a"}},
-			control: control, endpoint: &localHandlerEndpoint{events: &events}, maps: &localHandlerMaps{events: &events}, publisher: dynamicRuntimePublisher(t),
-		}, nil
+		return dynamicRuntimeComponents(t, sources, control, &events, nil), nil
 	}
 	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a", UID: types.UID("node-a")}}
 	runtime, err := newDynamicRuntimeWithFactory(cfg, fake.NewSimpleClientset(node), factory)
