@@ -43,6 +43,22 @@ func (e *FlannelMarkerEnsurer) EnsureMarker(ctx context.Context, desired reconci
 	return changed, nil
 }
 
+func (e *FlannelMarkerEnsurer) RepairOwnedMarker(ctx context.Context, owned reconcile.OwnedRule) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if owned.Identity == "" || owned.Identity == e.spec.Chain+"/"+e.spec.Comment {
+		return false, nil
+	}
+	if owned.Fingerprint == "" {
+		return false, reconcile.NewClassifiedError(reconcile.ErrorSafetyViolation, "MARKER_OWNERSHIP_UNPROVEN", 0, nil)
+	}
+	if err := e.manager.Remove(ctx, owned); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func validateMarkerFlannelState(state reconcile.FlannelState) error {
 	if state.BackendType != "vxlan" {
 		return fmt.Errorf("unsupported Flannel backend for marker: %q", state.BackendType)
