@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/cat-cc-Lcos/FNCache/internal/logging"
 	"github.com/cat-cc-Lcos/FNCache/internal/reconcile"
 )
 
@@ -19,6 +20,7 @@ type Worker struct {
 	queue   *Queue
 	handler Handler
 	barrier ExecutionBarrier
+	logger  *logging.Logger
 }
 
 func NewWorker(queue *Queue, handler Handler) (*Worker, error) {
@@ -26,10 +28,17 @@ func NewWorker(queue *Queue, handler Handler) (*Worker, error) {
 }
 
 func NewWorkerWithBarrier(queue *Queue, handler Handler, barrier ExecutionBarrier) (*Worker, error) {
+	return NewWorkerWithBarrierAndLogger(queue, handler, barrier, logging.NewDefault("queue"))
+}
+
+func NewWorkerWithBarrierAndLogger(queue *Queue, handler Handler, barrier ExecutionBarrier, logger *logging.Logger) (*Worker, error) {
 	if queue == nil || handler == nil {
 		return nil, fmt.Errorf("queue and handler are required")
 	}
-	return &Worker{queue: queue, handler: handler, barrier: barrier}, nil
+	if logger == nil {
+		logger = logging.NewDefault("queue")
+	}
+	return &Worker{queue: queue, handler: handler, barrier: barrier, logger: logger}, nil
 }
 
 func (w *Worker) Run(ctx context.Context) {
@@ -53,6 +62,9 @@ func (w *Worker) Run(ctx context.Context) {
 			err = w.barrier.Execute(ctx, key, func() error { return w.handler(ctx, key) })
 		} else {
 			err = w.handler(ctx, key)
+		}
+		if err != nil && ctx.Err() == nil {
+			w.logger.LogReconcileError(ctx, key, err)
 		}
 		switch {
 		case err == nil || ctx.Err() != nil:

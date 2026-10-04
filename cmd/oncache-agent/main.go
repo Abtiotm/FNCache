@@ -9,6 +9,7 @@ import (
 	"syscall"
 
 	"github.com/cat-cc-Lcos/FNCache/internal/agent"
+	"github.com/cat-cc-Lcos/FNCache/internal/logging"
 	"github.com/cat-cc-Lcos/FNCache/internal/reconcile"
 )
 
@@ -16,8 +17,13 @@ func main() {
 	manifest := flag.String("static-config", "", "path to a StaticRuntimeConfiguration manifest")
 	configPath := flag.String("config", "", "path to an AgentConfiguration for dynamic Kubernetes mode")
 	flag.Parse()
+	logger, loggerErr := logging.NewFromEnvironment("oncache-agent")
+	if loggerErr != nil {
+		fmt.Fprintln(os.Stderr, loggerErr)
+		os.Exit(2)
+	}
 	if (*manifest == "") == (*configPath == "") {
-		fmt.Fprintln(os.Stderr, "exactly one of -static-config or -config is required")
+		logger.Error(context.Background(), "invalid command line", "error", "exactly one of -static-config or -config is required")
 		os.Exit(2)
 	}
 	var err error
@@ -27,7 +33,7 @@ func main() {
 		err = runDynamic(*configPath)
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		logger.Error(context.Background(), "agent exited", "error", err.Error())
 		os.Exit(1)
 	}
 }

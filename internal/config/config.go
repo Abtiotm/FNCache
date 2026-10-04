@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cat-cc-Lcos/FNCache/internal/logging"
 	"gopkg.in/yaml.v3"
 )
 
@@ -170,6 +171,9 @@ func (c AgentConfiguration) Validate() error {
 	}
 	if c.Server.ListenAddress == "" {
 		return fmt.Errorf("server.listenAddress is required")
+	}
+	if _, err := logging.ParseLevel(c.LogLevel); err != nil {
+		return fmt.Errorf("log level is invalid: %w", err)
 	}
 	return nil
 }
