@@ -137,6 +137,10 @@ func (b *FirstPassBackend) Ensure(ctx context.Context, desired reconcile.Desired
 	if !desired.Enabled {
 		return false, nil
 	}
+	ownershipState, hasOwnership, err := b.loadOwnership(ctx)
+	if err != nil {
+		return false, err
+	}
 	changed, err := b.collection.EnsureCollection(ctx, desired, actual)
 	if err != nil {
 		return changed, fmt.Errorf("ensure collection: %w", err)
@@ -150,7 +154,7 @@ func (b *FirstPassBackend) Ensure(ctx context.Context, desired reconcile.Desired
 	if err != nil {
 		return changed, fmt.Errorf("rescan after collection ensure: %w", err)
 	}
-	cleanupChanged, err := b.cleanupStaleEndpoints(ctx, desired, current)
+	cleanupChanged, err := b.cleanupStaleEndpoints(ctx, desired, current, ownershipState, hasOwnership)
 	if err != nil {
 		return changed || cleanupChanged, fmt.Errorf("cleanup stale endpoints: %w", err)
 	}
@@ -181,13 +185,20 @@ func (b *FirstPassBackend) Ensure(ctx context.Context, desired reconcile.Desired
 	return changed, nil
 }
 
-func (b *FirstPassBackend) cleanupStaleEndpoints(ctx context.Context, desired reconcile.DesiredState, actual reconcile.ActualState) (bool, error) {
+func (b *FirstPassBackend) loadOwnership(ctx context.Context) (reconcile.OwnershipState, bool, error) {
 	state, err := b.ownership.Load(ctx)
 	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
+		return reconcile.OwnershipState{}, false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("load ownership: %w", err)
+		return reconcile.OwnershipState{}, false, fmt.Errorf("load ownership before mutation: %w", err)
+	}
+	return state, true, nil
+}
+
+func (b *FirstPassBackend) cleanupStaleEndpoints(ctx context.Context, desired reconcile.DesiredState, actual reconcile.ActualState, state reconcile.OwnershipState, hasOwnership bool) (bool, error) {
+	if !hasOwnership {
+		return false, nil
 	}
 	if len(state.Endpoints) == 0 {
 		return false, nil

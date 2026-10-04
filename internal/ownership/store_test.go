@@ -68,15 +68,51 @@ func TestStoreRejectsCorruptAndUnsupportedState(t *testing.T) {
 	if err := os.WriteFile(path, []byte("{"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Load(context.Background()); err == nil {
+	if _, err := store.Load(context.Background()); !errors.Is(err, ErrStateInvalid) {
 		t.Fatal("expected corrupt state error")
 	}
 	data, _ := json.Marshal(map[string]any{"schemaVersion": 2, "installationID": "i", "nodeUID": "n"})
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Load(context.Background()); err == nil {
+	if _, err := store.Load(context.Background()); !errors.Is(err, ErrStateInvalid) {
 		t.Fatal("expected schema version error")
+	}
+}
+
+func TestStoreClassifiesMissingAndUnreadableState(t *testing.T) {
+	store, _ := testStore(t)
+	if _, err := store.Load(context.Background()); !errors.Is(err, ErrStateMissing) || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing state was not classified: %v", err)
+	}
+
+	parent := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(parent, []byte("block"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	blocked, err := NewStore(filepath.Join(parent, "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := blocked.Load(context.Background()); !errors.Is(err, ErrStateUnreadable) {
+		t.Fatalf("unreadable state was not classified: %v", err)
+	}
+}
+
+func TestStoreCommitFailureIsClassified(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := os.Mkdir(path, 0750); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Commit(context.Background(), testState()); !errors.Is(err, ErrStateCommit) {
+		t.Fatalf("commit failure was not classified: %v", err)
+	}
+	if info, err := os.Stat(path); err != nil || !info.IsDir() {
+		t.Fatalf("commit failure replaced protected path: info=%v err=%v", info, err)
 	}
 }
 
