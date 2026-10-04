@@ -321,12 +321,12 @@ func (r *DynamicRuntime) initializeDatapath(ctx context.Context) error {
 		_ = components.Close()
 		return err
 	}
-	deleting, err := NewLocalEndpointDeleteHandler(LocalEndpointDeleteHandlerConfig{Store: r.store, Ownership: components.ownership, LocalNode: r.config.NodeName, Desired: observer, Scanner: observer, Control: components.control, Remover: remover, ReuseGuard: guard, Publisher: components.publisher})
+	deleting, err := NewLocalEndpointDeleteHandler(LocalEndpointDeleteHandlerConfig{Store: r.store, Ownership: components.ownership, LocalNode: r.config.NodeName, Desired: observer, Remover: remover, ReuseGuard: guard, Generation: generationTransaction})
 	if err != nil {
 		_ = components.Close()
 		return err
 	}
-	remote, err := NewRemoteChangeHandler(RemoteChangeHandlerConfig{Store: r.store, LocalNode: r.config.NodeName, Desired: observer, Scanner: observer, Control: components.control, Maps: components.mapWriter, Publisher: components.publisher})
+	remote, err := NewRemoteChangeHandler(RemoteChangeHandlerConfig{Store: r.store, LocalNode: r.config.NodeName, Desired: observer, Maps: components.mapWriter, Generation: generationTransaction})
 	if err != nil {
 		_ = components.Close()
 		return err
