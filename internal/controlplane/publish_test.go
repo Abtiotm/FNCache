@@ -157,7 +157,7 @@ func publishTestActual(desired reconcile.DesiredState) reconcile.ActualState {
 	actual := reconcile.ActualState{Control: reconcile.ControlState{Verified: true}, Programs: map[string]reconcile.ProgramState{
 		"tc_init_e": {ID: 10, Name: "tc_init_e"}, "tc_restore": {ID: 11, Name: "tc_restore"},
 		"tc_init_in": {ID: 12, Name: "tc_init_in"}, "tc_masq": {ID: 13, Name: "tc_masq"},
-	}, Maps: make(map[string]reconcile.MapState), FlannelRule: reconcile.RuleState{Present: true, Identity: "ONCACHE/oncache:install-a", Fingerprint: "rule-fp"}}
+	}, Maps: make(map[string]reconcile.MapState), FlannelRule: reconcile.RuleState{Present: true, JumpsPresent: true, Identity: "ONCACHE/oncache:install-a", Fingerprint: "rule-fp"}}
 	for _, expected := range requiredMaps {
 		actual.Maps[expected.name] = reconcile.MapState{ID: 1, Name: expected.name, KeySize: expected.keySize, ValueSize: expected.valueSize, MaxEntries: expected.maxEntries}
 	}

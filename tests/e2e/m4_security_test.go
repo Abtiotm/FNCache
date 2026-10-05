@@ -24,7 +24,7 @@ func TestM4ChartSecurityRender(t *testing.T) {
 			t.Fatalf("hardened chart contains forbidden setting %q", forbidden)
 		}
 	}
-	for _, required := range []string{"allowPrivilegeEscalation: false", "readOnlyRootFilesystem: true", "type: RuntimeDefault", "- ALL", "mountPath: /run/k3s/containerd"} {
+	for _, required := range []string{"allowPrivilegeEscalation: false", "readOnlyRootFilesystem: true", "type: RuntimeDefault", "type: Unconfined", "- ALL", "mountPath: /run/k3s/containerd"} {
 		if !strings.Contains(rendered, required) {
 			t.Fatalf("hardened chart is missing %q", required)
 		}

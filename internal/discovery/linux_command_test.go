@@ -10,6 +10,9 @@ func TestLinuxCommandParsers(t *testing.T) {
 	if !hasDirectAction([]byte("CONFIG_NET_CLS_ACT is set to y\neBPF program_type sched_cls is available")) {
 		t.Fatal("kernel TC capability was not recognized as direct-action support")
 	}
+	if !hasDirectAction([]byte("skipping kernel config, can't open file: No such file or directory\neBPF program_type sched_cls is available")) {
+		t.Fatal("sched_cls capability was rejected when kernel config was unavailable")
+	}
 	if !validRouteOutput([]byte(`[{"dst":"default"}]`)) || validRouteOutput([]byte("[]")) {
 		t.Fatal("route parser returned an unexpected result")
 	}

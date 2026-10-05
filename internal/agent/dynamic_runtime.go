@@ -43,6 +43,18 @@ type DynamicRuntime struct {
 
 type datapathComponentFactory func(context.Context, datapathComponentConfig) (*datapathComponents, error)
 
+type dynamicObservationBackend struct {
+	observer *DynamicObserver
+}
+
+func (b dynamicObservationBackend) Discover(ctx context.Context) (reconcile.DesiredState, error) {
+	return b.observer.Desired(ctx)
+}
+
+func (b dynamicObservationBackend) Scan(ctx context.Context) (reconcile.ActualState, error) {
+	return b.observer.Scan(ctx)
+}
+
 func NewDynamicRuntime(configPath string) (*DynamicRuntime, error) {
 	cfg, err := config.Load(configPath)
 	if err != nil {

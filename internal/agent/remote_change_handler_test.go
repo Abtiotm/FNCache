@@ -13,13 +13,19 @@ import (
 )
 
 type remoteMaps struct {
-	calls []string
-	err   error
+	calls          []string
+	remoteMappings int
+	err            error
 }
 
 func (m *remoteMaps) Clear(_ context.Context, name string) (int, error) {
 	m.calls = append(m.calls, name)
 	return 2, m.err
+}
+
+func (m *remoteMaps) EnsureRemoteMappings(_ context.Context, _ reconcile.DesiredState, _ reconcile.ActualState, _ bool) (bool, error) {
+	m.remoteMappings++
+	return true, m.err
 }
 
 func remoteChangeStore(t *testing.T) *kube.SnapshotStore {
@@ -57,7 +63,7 @@ func TestRemoteChangeHandlerInvalidatesAndPublishesLatestMapping(t *testing.T) {
 	if err := handler.Handle(context.Background(), reconcile.ReconcileKey{Kind: reconcile.ReconcileRemoteEndpoint, UID: "pod-remote"}); err != nil {
 		t.Fatal(err)
 	}
-	if len(maps.calls) != 3 || len(events) != 5 || events[0] != "desired" || events[1] != "disable" || events[2] != "scan" || events[3] != "scan" || events[4] != "publish" {
+	if len(maps.calls) != 3 || maps.remoteMappings != 1 || len(events) != 5 || events[0] != "desired" || events[1] != "disable" || events[2] != "scan" || events[3] != "scan" || events[4] != "publish" {
 		t.Fatalf("unexpected invalidation order: maps=%v events=%v", maps.calls, events)
 	}
 	remote, ok := publisher.desired.RemoteEndpoints[netip.MustParseAddr("10.42.1.2")]

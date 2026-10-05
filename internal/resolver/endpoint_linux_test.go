@@ -74,6 +74,15 @@ func TestResolveEndpointRejectsInvalidPodSnapshots(t *testing.T) {
 	}
 }
 
+func TestResolveEndpointRetriesUntilPodIPIsAssigned(t *testing.T) {
+	pod := endpointTestPod()
+	pod.PodIPv4 = netip.Addr{}
+	_, err := endpointTestResolver(&fakeSandboxResolver{}, &fakeLinkProbe{}).Resolve(context.Background(), pod)
+	if !errors.Is(err, ErrEndpointNotReady) {
+		t.Fatalf("unassigned PodIP was not retryable: %v", err)
+	}
+}
+
 func TestResolveEndpointRejectsSandboxDrift(t *testing.T) {
 	sandbox := &fakeSandboxResolver{infos: []SandboxInfo{endpointTestSandbox("sandbox-1"), endpointTestSandbox("sandbox-2")}}
 	probe := &fakeLinkProbe{peer: LinkIdentity{IfIndex: 10, IfName: "eth0"}, iflink: 20, host: LinkIdentity{IfIndex: 20, IfName: "vethweb"}}

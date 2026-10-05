@@ -84,8 +84,9 @@ int tc_init_e(struct __sk_buff *skb) {
     if (!parse_vxlan_ipv4(outer_iph, data_end, &inner_iph)) goto out;
 
     // Check if Ethernet frame has IP packet and set IP hdr ptr
-    // Make sure both egress_prog required to and is in established state
-    if ((inner_iph->tos & ONCACHE_TOS_MASK) != ONCACHE_TOS_MASK) goto out;
+    // Learn only normal Flannel traffic for a known remote PodIP. Unknown
+    // overlay traffic remains on the original path without cache mutation.
+    if (!bpf_map_lookup_elem(&egressip_cache, &inner_iph->daddr)) goto out;
     /////////////////////////// Policy Learning ///////////////////////////
 #ifdef ENABLENP
     struct oncache_flow_v1 tuple_;
@@ -110,7 +111,6 @@ int tc_init_e(struct __sk_buff *skb) {
     err = bpf_map_update_elem(&egress_cache, &outer_iph->daddr, &tmpnodeegressinfo_, BPF_NOEXIST);
 
     err = bpf_map_update_elem(&egressip_cache, &inner_iph->daddr, &outer_iph->daddr, BPF_NOEXIST);
-    if (set_ip_tos(skb, 50, 0) < 0) return TC_ACT_OK;
 out:
     return TC_ACT_OK;
 }
@@ -148,7 +148,6 @@ int tc_masq(struct __sk_buff *ctx) {
     // Must the ingress and egress both allow the flow, or will cause conntrack problem
     if (!action_ || !(action_->ingress_ready & action_->egress_ready)) {
         oncache_stat_inc(ONCACHE_STAT_MASQ_POLICY_MISS);
-        if (set_ip_tos(ctx, 0, ONCACHE_MISS_MASK) < 0) return TC_ACT_OK;
         goto out;
     }
 #endif
@@ -157,7 +156,6 @@ int tc_masq(struct __sk_buff *ctx) {
     struct oncache_egress_v1* egressinfo_ = bpf_map_lookup_elem(&egress_cache, nodeip_);
     if (!egressinfo_) {
         oncache_stat_inc(ONCACHE_STAT_MASQ_EGRESS_CACHE_MISS);
-        if (set_ip_tos(ctx, 0, ONCACHE_MISS_MASK) < 0) return TC_ACT_OK;
         goto out;
     }
 
@@ -262,7 +260,6 @@ int tc_restore(struct __sk_buff *ctx) {
     struct oncache_action_v1 *action_ = bpf_map_lookup_elem(&policy_cache, &tuple_);
     if (!action_ || !(action_->ingress_ready & action_->egress_ready)) {
         oncache_stat_inc(ONCACHE_STAT_RESTORE_POLICY_MISS);
-        if (set_ip_tos(ctx, 50, ONCACHE_MISS_MASK) < 0) return TC_ACT_OK;
         goto out;
     }
 #endif
@@ -309,8 +306,11 @@ int tc_init_in(struct __sk_buff *ctx) {
     __u32 ip_available = (__u8 *)data_end - (__u8 *)(eth + 1);
     if (!parse_ipv4_header(eth + 1, data_end, ip_available, &iphdr)) goto out;
 
-    // We only learn the flow that is marked as 0x4
-    if ((iphdr->tos & ONCACHE_TOS_MASK) != ONCACHE_TOS_MASK) goto out;
+    // A fallback packet carries the miss bit. Once the remote PodIP is
+    // known, later packets may arrive without that marker and can still
+    // complete ingress learning safely.
+    if ((iphdr->tos & ONCACHE_MISS_MASK) != ONCACHE_MISS_MASK &&
+        !bpf_map_lookup_elem(&egressip_cache, &iphdr->saddr)) goto out;
     ///////////////////////// Header/ifindex Learning ////////////////////
     struct oncache_ingress_v1* ingressinfo_ = bpf_map_lookup_elem(&ingress_cache, &iphdr->daddr);
     if (!ingressinfo_) {
@@ -338,7 +338,6 @@ int tc_init_in(struct __sk_buff *ctx) {
         }
     }
 #endif
-    if (set_ip_tos(ctx, 0, 0) < 0) return TC_ACT_OK;
 out:
     return action;
 }

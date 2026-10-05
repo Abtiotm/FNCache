@@ -61,7 +61,9 @@ security:
     add:
       - BPF
       - NET_ADMIN
+      - PERFMON
       - SYS_ADMIN
+      - SYS_PTRACE
 
 hostPID: true
 

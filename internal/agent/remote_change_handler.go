@@ -13,6 +13,10 @@ type remoteMapInvalidator interface {
 	Clear(context.Context, string) (int, error)
 }
 
+type remoteMapEnsurer interface {
+	EnsureRemoteMappings(context.Context, reconcile.DesiredState, reconcile.ActualState, bool) (bool, error)
+}
+
 type RemoteChangeHandlerConfig struct {
 	Store      *kube.SnapshotStore
 	LocalNode  string
@@ -57,11 +61,18 @@ func (h *RemoteChangeHandler) Handle(ctx context.Context, key reconcile.Reconcil
 	if err != nil {
 		return fmt.Errorf("build desired state after remote change: %w", err)
 	}
-	if err := h.config.Generation.Execute(ctx, desired, func(ctx context.Context, _ reconcile.DesiredState, _ reconcile.ActualState) error {
+	if err := h.config.Generation.Execute(ctx, desired, func(ctx context.Context, desired reconcile.DesiredState, actual reconcile.ActualState) error {
 		for _, name := range []string{"egressip_cache", "egress_cache", "policy_cache"} {
 			if _, err := h.config.Maps.Clear(ctx, name); err != nil {
 				return fmt.Errorf("clear %s for remote change: %w", name, err)
 			}
+		}
+		ensurer, ok := h.config.Maps.(remoteMapEnsurer)
+		if !ok {
+			return fmt.Errorf("remote Map writer does not support remote mappings")
+		}
+		if _, err := ensurer.EnsureRemoteMappings(ctx, desired, actual, true); err != nil {
+			return fmt.Errorf("ensure remote mappings: %w", err)
 		}
 		return nil
 	}); err != nil {

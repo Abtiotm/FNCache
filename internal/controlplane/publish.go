@@ -92,8 +92,8 @@ func VerifyState(desired reconcile.DesiredState, actual reconcile.ActualState) e
 			return fmt.Errorf("required Map schema is not verified: %s", expected.name)
 		}
 	}
-	if !actual.FlannelRule.Present {
-		return fmt.Errorf("Flannel marker rule is not present")
+	if !actual.FlannelRule.Present || !actual.FlannelRule.JumpsPresent {
+		return fmt.Errorf("Flannel marker rule or hook jumps are not present")
 	}
 	if err := verifyAttachment(actual.Attachments, desired.Flannel.UnderlayLink, datapath.HookEgress, "tc_init_e", programs["tc_init_e"]); err != nil {
 		return err

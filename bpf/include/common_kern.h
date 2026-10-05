@@ -214,19 +214,25 @@ static __always_inline void initegressinfo(struct oncache_egress_v1* ci, const v
 
 static inline int set_ip_tos(struct __sk_buff *skb, unsigned int off, __u8 tos)
 {
-    __u8 old_tos;
-    if (bpf_skb_load_bytes(skb, off + IP_TOS_OFF, &old_tos, sizeof(old_tos)) < 0) {
-        return -1;
-    }
-    __u8 new_tos;
-    __u8 set_mask = tos & ONCACHE_TOS_MASK;
+	__u8 tos_protocol[2];
+	if (bpf_skb_load_bytes(skb, off + IP_TOS_OFF, tos_protocol, sizeof(tos_protocol)) < 0) {
+		return -1;
+	}
+	__u8 old_tos = tos_protocol[0];
+	__u8 new_tos;
+	__u8 set_mask = tos & ONCACHE_TOS_MASK;
     if (set_mask){
         new_tos = old_tos | set_mask;
-    } else {
-        new_tos = old_tos & (__u8)~ONCACHE_TOS_MASK;
-    }
-    return bpf_skb_store_bytes(
-        skb, off + IP_TOS_OFF, &new_tos, sizeof(new_tos), BPF_F_RECOMPUTE_CSUM);
+	} else {
+		new_tos = old_tos & (__u8)~ONCACHE_TOS_MASK;
+	}
+	if (new_tos == old_tos) return 0;
+	__be16 old_word = ((__be16)tos_protocol[0] << 8) | tos_protocol[1];
+	__be16 new_word = ((__be16)new_tos << 8) | tos_protocol[1];
+	if (bpf_l3_csum_replace(skb, off + IP_CSUM_OFF, old_word, new_word, sizeof(new_word)) < 0) {
+		return -1;
+	}
+	return bpf_skb_store_bytes(skb, off + IP_TOS_OFF, &new_tos, sizeof(new_tos), 0);
 }
 
 static inline void set_new_ip(

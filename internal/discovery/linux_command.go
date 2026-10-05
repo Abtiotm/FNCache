@@ -16,7 +16,7 @@ func defaultCommandRunner(ctx context.Context, name string, args ...string) ([]b
 
 var requiredBPFHelpers = []string{
 	"bpf_map_lookup_elem", "bpf_map_update_elem", "bpf_get_hash_recalc",
-	"bpf_skb_adjust_room", "bpf_skb_store_bytes", "bpf_spin_lock", "bpf_spin_unlock",
+	"bpf_skb_adjust_room", "bpf_skb_store_bytes", "bpf_l3_csum_replace", "bpf_spin_lock", "bpf_spin_unlock",
 }
 
 func hasHelper(output []byte, helper string) bool {
@@ -33,8 +33,11 @@ func hasDirectAction(output []byte) bool {
 	if strings.Contains(text, "direct_action") || strings.Contains(text, "direct-action") {
 		return true
 	}
+	if strings.Contains(text, "ebpf program_type sched_cls is available") {
+		return true
+	}
 	return strings.Contains(text, "config_net_cls_act is set to y") &&
-		strings.Contains(text, "ebpf program_type sched_cls is available")
+		strings.Contains(text, "sched_cls")
 }
 
 func validRouteOutput(output []byte) bool {

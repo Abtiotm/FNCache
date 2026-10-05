@@ -159,9 +159,10 @@ type AttachmentState struct {
 }
 
 type RuleState struct {
-	Present     bool
-	Identity    string
-	Fingerprint string
+	Present      bool
+	JumpsPresent bool
+	Identity     string
+	Fingerprint  string
 }
 
 type OwnedObject struct {

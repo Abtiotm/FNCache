@@ -267,6 +267,8 @@ static int learn_hit_tests(const char *path) {
     uint8_t packet[PACKET_MAX], output[PACKET_MAX];
     size_t len = vxlan_packet(packet, 0x0c, IP_A, IP_B, IP_NODE);
     if (load_env(path, &e) || control(&e, 1, 0, 0, UINT64_MAX)) return 1;
+    uint32_t known_remote = IP_B, known_node = IP_NODE;
+    if (bpf_map_update_elem(e.egressip, &known_remote, &known_node, BPF_ANY)) return 1;
     if (run(program(&e, "tc_init_e"), packet, len, IF_IN, output) != TC_ACT_OK) return 1;
     struct oncache_flow_v1 flow = {.local_addr = IP_A, .remote_addr = IP_B,
                                    .local_port = htons(1234), .remote_port = htons(4321),
@@ -292,8 +294,8 @@ static int learn_hit_tests(const char *path) {
     }
     len = plain_packet(packet, 0xa0, IPPROTO_UDP, IP_A, IP_B);
     if (run(program(&e, "tc_masq"), packet, len, IF_IN, output) != TC_ACT_OK ||
-        output[15] != 0xa4) {
-        fprintf(stderr, "FAIL: miss TOS\n");
+        output[15] != 0xa0) {
+        fprintf(stderr, "FAIL: fallback changed TOS\n");
         return 1;
     }
     if (seed_hit(&e, IF_IN)) {
@@ -325,6 +327,8 @@ static void *race_run(void *arg) {
 static int ready_race(const char *path) {
     struct env e;
     if (load_env(path, &e) || control(&e, 1, 0, 0, UINT64_MAX)) return 1;
+    uint32_t known_remote = IP_B, known_node = IP_NODE;
+    if (bpf_map_update_elem(e.egressip, &known_remote, &known_node, BPF_ANY)) return 1;
     uint8_t egress[PACKET_MAX], ingress[PACKET_MAX];
     size_t elen = vxlan_packet(egress, 0x0c, IP_A, IP_B, IP_NODE);
     size_t ilen = plain_packet(ingress, 0x0c, IPPROTO_UDP, IP_B, IP_A);

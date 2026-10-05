@@ -21,8 +21,14 @@ func TestFlannelMarkerEnsurerCreatesMarker(t *testing.T) {
 		if strings.Contains(joined, " -N ") {
 			output = "-N ONCACHE\n"
 		}
-		if strings.Contains(joined, " -A ") {
+		if strings.Contains(joined, " -A ONCACHE") {
 			output += "-A ONCACHE -m comment --comment \"oncache:install-a\" -m conntrack --ctstate ESTABLISHED -m tos --tos 0x04/0x04 -j TOS --set-tos 0x08/0x08\n"
+		}
+		if strings.Contains(joined, " -A PREROUTING") {
+			output += `-A PREROUTING -m comment --comment "oncache:install-a-jump-PREROUTING" -j ONCACHE` + "\n"
+		}
+		if strings.Contains(joined, " -A POSTROUTING") {
+			output += `-A POSTROUTING -m comment --comment "oncache:install-a-jump-POSTROUTING" -j ONCACHE` + "\n"
 		}
 		return nil, nil
 	})

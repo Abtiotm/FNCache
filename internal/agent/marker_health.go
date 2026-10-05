@@ -43,7 +43,7 @@ func (m *MarkerHealthMonitor) Check(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrMarkerUnhealthy, err)
 	}
-	if !state.Present {
+	if !state.Present || !state.JumpsPresent {
 		actual, err := m.pins.Scan(ctx)
 		if err != nil {
 			return fmt.Errorf("%w: inspect control state: %v", ErrMarkerUnhealthy, err)
@@ -51,7 +51,7 @@ func (m *MarkerHealthMonitor) Check(ctx context.Context) error {
 		if !actual.Control.Enabled {
 			return nil
 		}
-		return fmt.Errorf("%w: marker rule is missing", ErrMarkerDrift)
+		return fmt.Errorf("%w: marker rule or jump is missing", ErrMarkerDrift)
 	}
 	identity := m.spec.Chain + "/" + m.spec.Comment
 	if state.Identity != identity || state.Fingerprint != m.expectedFingerprint {

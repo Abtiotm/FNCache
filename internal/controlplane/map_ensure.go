@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net/netip"
+	"sort"
 
 	"github.com/cat-cc-Lcos/FNCache/internal/reconcile"
 	"github.com/cat-cc-Lcos/FNCache/internal/resolver"
@@ -67,6 +68,41 @@ func (e *MapEnsurer) EnsureEndpointMaps(ctx context.Context, desired reconcile.D
 		return changed || deviceChanged, fmt.Errorf("ensure devmap: %w", err)
 	}
 	return changed || deviceChanged, nil
+}
+
+func (e *MapEnsurer) EnsureRemoteMappings(ctx context.Context, desired reconcile.DesiredState, actual reconcile.ActualState, fastPathDisabled bool) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if !desired.Enabled {
+		return false, nil
+	}
+	if !fastPathDisabled || !actual.Control.Verified || actual.Control.Enabled {
+		return false, fmt.Errorf("refusing remote Map update while fast path is enabled or unverified")
+	}
+	if err := validateMapState(actual, "egressip_cache", 4, 4, 4096); err != nil {
+		return false, err
+	}
+	addresses := make([]netip.Addr, 0, len(desired.RemoteEndpoints))
+	for podIP := range desired.RemoteEndpoints {
+		addresses = append(addresses, podIP)
+	}
+	sort.Slice(addresses, func(i, j int) bool { return addresses[i].Less(addresses[j]) })
+	changed := false
+	for _, podIP := range addresses {
+		mapping := desired.RemoteEndpoints[podIP]
+		if !podIP.Is4() || !mapping.NodeIPv4.IsValid() || !mapping.NodeIPv4.Is4() {
+			return changed, fmt.Errorf("remote mapping must use IPv4: pod=%s node=%s", podIP, mapping.NodeIPv4)
+		}
+		podKey := podIP.As4()
+		nodeValue := mapping.NodeIPv4.As4()
+		updated, err := e.store.Ensure(ctx, "egressip_cache", podKey[:], nodeValue[:])
+		if err != nil {
+			return changed || updated, fmt.Errorf("ensure egressip_cache for %s: %w", podIP, err)
+		}
+		changed = changed || updated
+	}
+	return changed, nil
 }
 
 func validateMapState(actual reconcile.ActualState, name string, keySize, valueSize, maxEntries uint32) error {

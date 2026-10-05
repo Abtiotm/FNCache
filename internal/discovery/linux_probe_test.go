@@ -101,7 +101,7 @@ func probeFixture(t *testing.T, mount, btf, cri bool) (*discovery.LinuxProbe, di
 func fakeCommandRunner(_ context.Context, name string, args ...string) ([]byte, error) {
 	switch name {
 	case "bpftool":
-		return []byte("bpf_map_lookup_elem bpf_map_update_elem bpf_get_hash_recalc bpf_skb_adjust_room bpf_skb_store_bytes bpf_spin_lock bpf_spin_unlock direct_action"), nil
+		return []byte("bpf_map_lookup_elem bpf_map_update_elem bpf_get_hash_recalc bpf_skb_adjust_room bpf_skb_store_bytes bpf_l3_csum_replace bpf_spin_lock bpf_spin_unlock direct_action"), nil
 	case "tc":
 		for _, arg := range args {
 			if arg == "filter" {

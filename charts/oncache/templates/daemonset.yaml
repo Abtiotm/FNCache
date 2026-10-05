@@ -63,6 +63,8 @@ spec:
             readOnlyRootFilesystem: true
             seccompProfile:
               type: RuntimeDefault
+            appArmorProfile:
+              type: Unconfined
             capabilities:
               drop:
                 - ALL

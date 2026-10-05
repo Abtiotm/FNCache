@@ -13,10 +13,11 @@ func TestRuleScannerFindsMarkerRule(t *testing.T) {
 	var command string
 	scanner := NewRuleScanner(func(_ context.Context, name string, args ...string) ([]byte, error) {
 		command = name + " " + strings.Join(args, " ")
-		return []byte(`-A ONCACHE -m comment --comment "oncache:install-a" -m conntrack --ctstate ESTABLISHED -m tos --tos 0x04/0x04 -j TOS --set-tos 0x08/0x08`), nil
+		spec := MarkerRuleSpec{Chain: "ONCACHE", Comment: "oncache:install-a"}
+		return []byte(markerJumpLine(spec, "PREROUTING") + "\n" + markerJumpLine(spec, "POSTROUTING") + "\n" + markerRuleLine(spec)), nil
 	})
 	state, err := scanner.Scan(context.Background(), MarkerRuleSpec{Chain: "ONCACHE", Comment: "oncache:install-a"})
-	if err != nil || !state.Present || state.Identity != "ONCACHE/oncache:install-a" || state.Fingerprint == "" || command != "iptables-nft -t mangle -S" {
+	if err != nil || !state.Present || !state.JumpsPresent || state.Identity != "ONCACHE/oncache:install-a" || state.Fingerprint == "" || command != "iptables-nft -t mangle -S" {
 		t.Fatalf("unexpected marker state: state=%+v err=%v command=%q", state, err, command)
 	}
 }
@@ -33,13 +34,17 @@ func TestMarkerRuleManagerCreatesAndReusesRule(t *testing.T) {
 		switch {
 		case strings.Contains(strings.Join(args, " "), " -N "):
 			output = "-N ONCACHE\n"
-		case strings.Contains(strings.Join(args, " "), " -A "):
+		case strings.Contains(strings.Join(args, " "), " -A ONCACHE"):
 			output += markerRuleLine(spec) + "\n"
+		case strings.Contains(strings.Join(args, " "), " -A PREROUTING"):
+			output += markerJumpLine(spec, "PREROUTING") + "\n"
+		case strings.Contains(strings.Join(args, " "), " -A POSTROUTING"):
+			output += markerJumpLine(spec, "POSTROUTING") + "\n"
 		}
 		return nil, nil
 	})
 	state, changed, err := manager.Ensure(context.Background(), spec)
-	if err != nil || !changed || !state.Present || len(commands) != 4 {
+	if err != nil || !changed || !state.Present || !state.JumpsPresent || len(commands) != 8 {
 		t.Fatalf("unexpected create result: state=%+v changed=%v err=%v commands=%v", state, changed, err, commands)
 	}
 	_, changed, err = manager.Ensure(context.Background(), spec)
@@ -50,13 +55,13 @@ func TestMarkerRuleManagerCreatesAndReusesRule(t *testing.T) {
 
 func TestMarkerRuleManagerReplacesOwnedDrift(t *testing.T) {
 	spec := MarkerRuleSpec{Chain: "ONCACHE", Comment: "oncache:install-a"}
-	output := "-N ONCACHE\n-A ONCACHE -m comment --comment \"oncache:install-a\" -m conntrack --ctstate ESTABLISHED -m tos --tos 0x04/0x04 -j TOS --set-tos 0x01/0x01\n"
+	output := "-N ONCACHE\n" + markerJumpLine(spec, "PREROUTING") + "\n" + markerJumpLine(spec, "POSTROUTING") + "\n-A ONCACHE -m comment --comment \"oncache:install-a\" -m conntrack --ctstate ESTABLISHED -m tos --tos 0x04/0x04 -j TOS --set-tos 0x01/0x01\n"
 	replaced := false
 	manager := NewMarkerRuleManager(func(_ context.Context, _ string, args ...string) ([]byte, error) {
 		joined := strings.Join(args, " ")
 		if strings.Contains(joined, " -R ") {
 			replaced = true
-			output = "-N ONCACHE\n" + markerRuleLine(spec) + "\n"
+			output = "-N ONCACHE\n" + markerJumpLine(spec, "PREROUTING") + "\n" + markerJumpLine(spec, "POSTROUTING") + "\n" + markerRuleLine(spec) + "\n"
 		}
 		return []byte(output), nil
 	})

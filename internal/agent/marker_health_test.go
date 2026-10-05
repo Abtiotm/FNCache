@@ -41,7 +41,7 @@ func newMarkerHealthMonitor(t *testing.T, rules *fakeMarkerHealthRules, pins *fa
 
 func TestMarkerHealthMonitorAcceptsCanonicalRule(t *testing.T) {
 	spec := markerHealthSpec()
-	rules := &fakeMarkerHealthRules{state: reconcile.RuleState{Present: true, Identity: "ONCACHE/oncache:test", Fingerprint: flannel.ExpectedMarkerFingerprint(spec)}}
+	rules := &fakeMarkerHealthRules{state: reconcile.RuleState{Present: true, JumpsPresent: true, Identity: "ONCACHE/oncache:test", Fingerprint: flannel.ExpectedMarkerFingerprint(spec)}}
 	monitor := newMarkerHealthMonitor(t, rules, &fakeMarkerHealthPins{})
 	if err := monitor.Check(context.Background()); err != nil {
 		t.Fatal(err)
@@ -55,6 +55,7 @@ func TestMarkerHealthMonitorHandlesMissingAndDriftedRule(t *testing.T) {
 		t.Fatalf("disabled datapath treated missing marker as failure: %v", err)
 	}
 	rules.state.Present = true
+	rules.state.JumpsPresent = true
 	rules.state.Fingerprint = "changed"
 	if err := monitor.Check(context.Background()); !errors.Is(err, ErrMarkerDrift) {
 		t.Fatalf("error = %v, want ErrMarkerDrift", err)

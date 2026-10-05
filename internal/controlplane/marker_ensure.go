@@ -37,7 +37,7 @@ func (e *FlannelMarkerEnsurer) EnsureMarker(ctx context.Context, desired reconci
 	if err != nil {
 		return false, fmt.Errorf("ensure Flannel marker: %w", err)
 	}
-	if !state.Present {
+	if !state.Present || !state.JumpsPresent {
 		return false, fmt.Errorf("Flannel marker was not present after ensure")
 	}
 	return changed, nil

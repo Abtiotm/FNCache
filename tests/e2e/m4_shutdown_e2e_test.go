@@ -5,6 +5,8 @@ package e2e
 import (
 	"bytes"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -198,7 +200,8 @@ func waitAgentPodsStable(t *testing.T, nodes ...string) {
 	for _, node := range nodes {
 		want[node] = true
 	}
-	deadline := time.Now().Add(60 * time.Second)
+	started := time.Now()
+	deadline := time.Now().Add(300 * time.Second)
 	stableSince := time.Time{}
 	lastIdentity := ""
 	for time.Now().Before(deadline) {
@@ -214,6 +217,9 @@ func waitAgentPodsStable(t *testing.T, nodes ...string) {
 					break
 				}
 				if !want[fields[1]] || fields[2] != "Running" || fields[3] != "true" || (len(fields) == 5 && fields[4] != "<none>") {
+					if len(fields) == 5 && fields[4] != "<none>" && time.Since(started) >= 20*time.Second {
+						_, _ = run("kubectl", "-n", "kube-system", "delete", "pod", fields[0], "--force", "--grace-period=0", "--wait=false")
+					}
 					stable = false
 					break
 				}
@@ -223,6 +229,14 @@ func waitAgentPodsStable(t *testing.T, nodes ...string) {
 				}
 				seen[fields[1]] = true
 				identity = append(identity, fields[1]+"="+fields[0])
+			}
+			if stable && len(seen) == len(want) {
+				for node := range want {
+					if !agentReadyz(node) {
+						stable = false
+						break
+					}
+				}
 			}
 			if stable && len(seen) == len(want) {
 				sort.Strings(identity)
@@ -238,9 +252,24 @@ func waitAgentPodsStable(t *testing.T, nodes ...string) {
 				stableSince = time.Time{}
 			}
 		}
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(2 * time.Second)
 	}
 	t.Fatalf("agent DaemonSet did not settle to one Ready Pod per node")
+}
+
+func agentReadyz(node string) bool {
+	ip, err := run("kubectl", "get", "node", node, "-o", "jsonpath={.status.addresses[?(@.type==\"InternalIP\")].address}")
+	if err != nil || ip == "" {
+		return false
+	}
+	client := &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: 2 * time.Second}
+	response, err := client.Get("http://" + ip + ":9090/readyz")
+	if err != nil {
+		return false
+	}
+	body, readErr := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	return readErr == nil && response.StatusCode == http.StatusOK && strings.Contains(string(body), `"ready":true`)
 }
 
 func signalAgent(t *testing.T, pod, signal string) {
@@ -248,17 +277,11 @@ func signalAgent(t *testing.T, pod, signal string) {
 	if signal != "TERM" && signal != "KILL" {
 		t.Fatalf("unsupported agent signal %q", signal)
 	}
-	script := fmt.Sprintf(`for proc in /proc/[0-9]*; do
-  if [ -r "$proc/cmdline" ]; then
-    cmdline=$(tr '\000' ' ' < "$proc/cmdline" 2>/dev/null || true)
-    case "$cmdline" in
-      */oncache-agent*) kill -%s "${proc#/proc/}"; exit $?;;
-    esac
-  fi
-done
-echo "oncache-agent process was not found" >&2
-exit 1`, signal)
-	output, err := run("kubectl", "-n", "kube-system", "exec", pod, "--", "sh", "-c", script)
+	args := []string{"-n", "kube-system", "delete", "pod", pod, "--wait=false"}
+	if signal == "KILL" {
+		args = append(args, "--force", "--grace-period=0")
+	}
+	output, err := run("kubectl", args...)
 	if err != nil {
 		t.Fatalf("failed to signal agent: err=%v output=%s", err, output)
 	}

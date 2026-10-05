@@ -48,6 +48,28 @@ type datapathComponents struct {
 	publisher        *controlplane.Publisher
 }
 
+type endpointMapWriter interface {
+	controlplane.EndpointMapRemover
+	EnsureRemoteMappings(context.Context, reconcile.DesiredState, reconcile.ActualState, bool) (bool, error)
+}
+
+type endpointMapWriterAdapter struct {
+	writer *datapath.MapWriter
+	maps   *controlplane.MapEnsurer
+}
+
+func (a *endpointMapWriterAdapter) Delete(ctx context.Context, name string, key []byte) (bool, error) {
+	return a.writer.Delete(ctx, name, key)
+}
+
+func (a *endpointMapWriterAdapter) Clear(ctx context.Context, name string) (int, error) {
+	return a.writer.Clear(ctx, name)
+}
+
+func (a *endpointMapWriterAdapter) EnsureRemoteMappings(ctx context.Context, desired reconcile.DesiredState, actual reconcile.ActualState, fastPathDisabled bool) (bool, error) {
+	return a.maps.EnsureRemoteMappings(ctx, desired, actual, fastPathDisabled)
+}
+
 type localCollectionEnsurer interface {
 	EnsureCollection(context.Context, reconcile.DesiredState, reconcile.ActualState) (bool, error)
 }
@@ -151,7 +173,7 @@ func newDatapathComponents(ctx context.Context, config datapathComponentConfig) 
 		return nil, err
 	}
 	components := &datapathComponents{
-		cri: cri, endpointResolver: endpointResolver, endpointScanner: endpointScanner, pins: pins, tcScanner: tcScanner, tc: tc, mapWriter: mapWriter, ownership: store,
+		cri: cri, endpointResolver: endpointResolver, endpointScanner: endpointScanner, pins: pins, tcScanner: tcScanner, tc: tc, mapWriter: &endpointMapWriterAdapter{writer: mapWriter, maps: maps}, ownership: store,
 		sources: controlplane.Sources{Preflight: discovery.NewPreflight(discovery.NewLinuxProbe("/")), Flannel: flannel.NewDiscovery(nil), Endpoints: endpointScanner, Pins: pins, TC: tcScanner, Rules: flannel.NewRuleScanner(nil)},
 		control: &runtimeControl{pinRoot: config.PinRoot, writer: controlWriter}, collection: collection, marker: marker,
 		base: base, endpoint: endpoint, maps: maps, publisher: publisher,

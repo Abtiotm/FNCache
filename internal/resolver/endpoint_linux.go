@@ -126,7 +126,10 @@ func validatePodSnapshot(pod PodSnapshot) error {
 	if pod.HostNetwork {
 		return fmt.Errorf("%w: hostNetwork pod is not supported", ErrUnsupported)
 	}
-	if !pod.PodIPv4.IsValid() || !pod.PodIPv4.Is4() {
+	if !pod.PodIPv4.IsValid() {
+		return fmt.Errorf("%w: PodIP is not assigned", ErrEndpointNotReady)
+	}
+	if !pod.PodIPv4.Is4() {
 		return fmt.Errorf("%w: endpoint requires IPv4", ErrUnsupported)
 	}
 	if pod.Phase != "" && pod.Phase != "Running" {
