@@ -256,6 +256,9 @@ func (b *FirstPassBackend) Commit(ctx context.Context, desired reconcile.Desired
 	if err := VerifyState(desired, actual); err != nil {
 		return err
 	}
+	if err := b.publisher.checkPublishGuard(ctx); err != nil {
+		return err
+	}
 	if err := b.publisher.store.Commit(ctx, b.publisher.ownershipState(desired, actual)); err != nil {
 		return fmt.Errorf("commit ownership: %w", err)
 	}
@@ -263,6 +266,9 @@ func (b *FirstPassBackend) Commit(ctx context.Context, desired reconcile.Desired
 }
 
 func (b *FirstPassBackend) Publish(ctx context.Context, desired reconcile.DesiredState) error {
+	if err := b.publisher.checkPublishGuard(ctx); err != nil {
+		return err
+	}
 	config := b.publisher.config
 	return b.publisher.control.Publish(ctx, desired.Generation, config.HeartbeatNS, config.HeartbeatTimeoutNS, config.Flags)
 }

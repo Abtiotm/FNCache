@@ -27,6 +27,9 @@ type dynamicRuntimeMaps struct{}
 
 func (dynamicRuntimeMaps) Delete(context.Context, string, []byte) (bool, error) { return true, nil }
 func (dynamicRuntimeMaps) Clear(context.Context, string) (int, error)           { return 0, nil }
+func (dynamicRuntimeMaps) EnsureRemoteMappings(context.Context, reconcile.DesiredState, reconcile.ActualState, bool) (bool, error) {
+	return true, nil
+}
 
 type dynamicRuntimeTC struct{}
 
@@ -148,11 +151,12 @@ func dynamicRuntimePublisher(t *testing.T, published *atomic.Bool) *controlplane
 
 func dynamicRuntimeComponents(t *testing.T, sources controlplane.Sources, control localControl, events *[]string, published *atomic.Bool) *datapathComponents {
 	t.Helper()
+	publisher := dynamicRuntimePublisher(t, published)
 	return &datapathComponents{
 		cri: &fakeCloser{}, endpointResolver: &localHandlerResolver{endpoint: handlerEndpoint("unused"), events: events}, sources: sources,
 		tc: dynamicRuntimeTC{}, mapWriter: dynamicRuntimeMaps{}, ownership: &deleteOwnership{state: reconcile.OwnershipState{SchemaVersion: 1, InstallationID: "install", NodeUID: "node-a"}},
 		control: control, collection: dynamicRuntimeEnsurers{}, marker: dynamicRuntimeEnsurers{}, base: dynamicRuntimeEnsurers{},
-		endpoint: &localHandlerEndpoint{events: events}, maps: &localHandlerMaps{events: events}, publisher: dynamicRuntimePublisher(t, published),
+		endpoint: &localHandlerEndpoint{events: events}, maps: &localHandlerMaps{events: events}, publisher: publisher,
 	}
 }
 
@@ -231,6 +235,82 @@ func TestDynamicRuntimeStartsKubernetesControlChain(t *testing.T) {
 	}
 	if err := runtime.Run(context.Background()); err == nil {
 		t.Fatal("restarting a stopped runtime unexpectedly succeeded")
+	}
+}
+
+func TestDynamicRuntimeBlocksQueuedPublishAfterKubernetesFreshnessExpires(t *testing.T) {
+	sources := controlplane.Sources{Preflight: dynamicObserverPreflight{}, Flannel: dynamicObserverFlannel{}, Endpoints: dynamicObserverEndpoints{}, Pins: dynamicRuntimePins{}, TC: dynamicRuntimeTC{}, Rules: dynamicObserverRules{}}
+	events := []string{}
+	published := &atomic.Bool{}
+	control := &dynamicRuntimeHeartbeatControl{localHandlerControl: &localHandlerControl{events: &events}}
+	cfg := dynamicTestConfig()
+	cfg.Health.Interval = config.Duration(10 * time.Millisecond)
+	cfg.Kube.MaxStaleness = config.Duration(100 * time.Millisecond)
+	cfg.Kube.ResyncInterval = config.Duration(time.Second)
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a", UID: types.UID("node-a")}}
+	client := fake.NewSimpleClientset(node)
+	var apiDown atomic.Bool
+	for _, resource := range []string{"nodes", "pods"} {
+		client.PrependReactor("list", resource, func(k8stesting.Action) (bool, runtime.Object, error) {
+			if apiDown.Load() {
+				return true, nil, errors.New("API unavailable")
+			}
+			return false, nil, nil
+		})
+	}
+	factory := func(context.Context, datapathComponentConfig) (*datapathComponents, error) {
+		return dynamicRuntimeComponents(t, sources, control, &events, published), nil
+	}
+	runtime, err := newDynamicRuntimeWithFactory(cfg, client, factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := runtime.bootstrap.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.initializeDatapath(ctx); err != nil {
+		t.Fatal(err)
+	}
+	workerDone := make(chan struct{})
+	go func() {
+		runtime.worker.Run(ctx)
+		close(workerDone)
+	}()
+	defer func() {
+		cancel()
+		runtime.queue.ShutDown()
+		<-workerDone
+		_ = runtime.components.Close()
+	}()
+
+	apiDown.Store(true)
+	if err := runtime.source.ProbeAPI(ctx); err == nil {
+		t.Fatal("API probe unexpectedly succeeded after API outage")
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		if errors.Is(runtime.apiHealth.Fresh(ctx), ErrKubernetesAPIStale) {
+			break
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatal("Kubernetes API freshness did not expire")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	published.Store(false)
+	key := reconcile.ReconcileKey{Kind: reconcile.ReconcileGlobal, Name: "node-a"}
+	runtime.queue.Add(key)
+	deadline = time.Now().Add(time.Second)
+	for runtime.queue.NumRequeues(key) == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if runtime.queue.NumRequeues(key) == 0 {
+		t.Fatal("stale queued reconciliation did not return an error")
+	}
+	if published.Load() {
+		t.Fatal("stale queued reconciliation published control state")
 	}
 }
 
