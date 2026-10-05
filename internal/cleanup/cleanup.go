@@ -3,10 +3,16 @@ package cleanup
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 
+	"github.com/cat-cc-Lcos/FNCache/internal/controlplane"
 	"github.com/cat-cc-Lcos/FNCache/internal/datapath"
+	"github.com/cat-cc-Lcos/FNCache/internal/overlay/flannel"
+	"github.com/cat-cc-Lcos/FNCache/internal/ownership"
 	"github.com/cat-cc-Lcos/FNCache/internal/reconcile"
+	"github.com/cat-cc-Lcos/FNCache/internal/resolver"
 )
 
 const (
@@ -80,6 +86,139 @@ func (p Plan) Execute(ctx context.Context, executor Executor, dryRun bool) error
 		}
 	}
 	return nil
+}
+
+type nodeExecutor struct {
+	control *datapath.ControlWriter
+	remover *controlplane.EndpointRemover
+	manager *datapath.Manager
+	marker  *flannel.MarkerRuleManager
+	store   *ownership.Store
+	pinRoot string
+}
+
+func (e *nodeExecutor) Disable(ctx context.Context) error {
+	if _, err := os.Stat(filepath.Join(e.pinRoot, "maps", "control_map")); os.IsNotExist(err) {
+		return nil
+	}
+	return e.control.Disable(ctx)
+}
+func (e *nodeExecutor) RemoveAttachment(ctx context.Context, a reconcile.AttachmentState) error {
+	return e.remover.RemoveOwnedAttachment(ctx, a)
+}
+func (e *nodeExecutor) RemoveMarker(ctx context.Context, r reconcile.OwnedRule) error {
+	return e.marker.Remove(ctx, r)
+}
+func (e *nodeExecutor) RemoveMap(ctx context.Context, name string, id uint32) error {
+	return e.manager.RemovePinnedMap(ctx, name, id)
+}
+func (e *nodeExecutor) RemoveProgram(ctx context.Context, name string, id uint32) error {
+	return e.manager.RemovePinnedProgram(ctx, name, id)
+}
+func (e *nodeExecutor) RemoveState(ctx context.Context) error { return e.store.Remove(ctx) }
+
+func Run(ctx context.Context, options Options, dryRun bool) (Plan, error) {
+	if options.PinRoot == "" || options.StatePath == "" || options.InstallationID == "" || options.MarkerChain == "" || options.MarkerComment == "" {
+		return Plan{}, fmt.Errorf("cleanup options are incomplete")
+	}
+	store, err := ownership.NewStore(options.StatePath)
+	if err != nil {
+		return Plan{}, err
+	}
+	state, err := store.Load(ctx)
+	if err != nil {
+		return Plan{}, fmt.Errorf("load ownership for cleanup: %w", err)
+	}
+	if state.InstallationID != options.InstallationID || state.ABI != reconcile.BPFABIVersion {
+		return Plan{}, fmt.Errorf("ownership identity or BPF ABI does not match cleanup configuration")
+	}
+	pins, err := datapath.NewPinScanner(options.PinRoot)
+	if err != nil {
+		return Plan{}, err
+	}
+	actual, err := pins.Scan(ctx)
+	if err != nil {
+		return Plan{}, fmt.Errorf("scan pinned objects: %w", err)
+	}
+	unresolved := make([]reconcile.AttachmentState, 0)
+	scanState := state
+	scanState.Attachments = append([]reconcile.AttachmentState(nil), state.Attachments...)
+	links := make([]resolver.LinkIdentity, 0)
+	seen := make(map[string]struct{})
+	for index, attachment := range scanState.Attachments {
+		if attachment.Link.NetNSInode != 0 {
+			path, ok := netNSPath(attachment.Link.NetNSInode)
+			if !ok {
+				unresolved = append(unresolved, attachment)
+				continue
+			}
+			attachment.Link.NetNSPath = path
+			scanState.Attachments[index] = attachment
+		}
+		key := fmt.Sprintf("%d/%d", attachment.Link.NetNSInode, attachment.Link.IfIndex)
+		if _, ok := seen[key]; !ok {
+			seen[key] = struct{}{}
+			links = append(links, attachment.Link)
+		}
+	}
+	tcBackend, err := datapath.NewLinuxTCBackend(options.PinRoot)
+	if err != nil {
+		return Plan{}, err
+	}
+	tc, err := datapath.NewTCManagerWithNetNS(tcBackend, datapath.NewNetNSManager())
+	if err != nil {
+		return Plan{}, err
+	}
+	tcScanner, err := datapath.NewTCScanner(tc)
+	if err != nil {
+		return Plan{}, err
+	}
+	tcActual, err := tcScanner.Scan(ctx, links)
+	if err != nil {
+		return Plan{}, fmt.Errorf("scan TC objects: %w", err)
+	}
+	actual.Attachments = tcActual.Attachments
+	marker, err := flannel.NewRuleScanner(nil).Scan(ctx, flannel.MarkerRuleSpec{Chain: options.MarkerChain, Comment: options.MarkerComment})
+	if err != nil {
+		return Plan{}, fmt.Errorf("scan marker rule: %w", err)
+	}
+	plan := BuildPlan(scanState, actual, marker, options.MarkerChain+"/"+options.MarkerComment, unresolved)
+	if dryRun {
+		return plan, nil
+	}
+	if len(plan.Blocked) != 0 {
+		return plan, fmt.Errorf("cleanup blocked by %d ownership conflicts", len(plan.Blocked))
+	}
+	mapWriter, err := datapath.NewMapWriter(options.PinRoot)
+	if err != nil {
+		return plan, err
+	}
+	remover, err := controlplane.NewEndpointRemover(mapWriter, tc)
+	if err != nil {
+		return plan, err
+	}
+	control, err := datapath.NewControlWriter(options.PinRoot)
+	if err != nil {
+		return plan, err
+	}
+	manager, err := datapath.NewManager(options.PinRoot)
+	if err != nil {
+		return plan, err
+	}
+	executor := &nodeExecutor{control: control, remover: remover, manager: manager, marker: flannel.NewMarkerRuleManager(nil), store: store, pinRoot: options.PinRoot}
+	return plan, plan.Execute(ctx, executor, false)
+}
+
+func netNSPath(inode uint64) (string, bool) {
+	paths, _ := filepath.Glob("/proc/[0-9]*/ns/net")
+	want := fmt.Sprintf("net:[%d]", inode)
+	for _, path := range paths {
+		target, err := os.Readlink(path)
+		if err == nil && target == want {
+			return path, true
+		}
+	}
+	return "", false
 }
 
 func BuildPlan(state reconcile.OwnershipState, actual reconcile.ActualState, marker reconcile.RuleState, markerIdentity string, unresolvedNetNS []reconcile.AttachmentState) Plan {

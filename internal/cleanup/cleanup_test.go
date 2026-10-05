@@ -85,3 +85,14 @@ func TestBuildPlanBlocksUnresolvedNetNSAttachment(t *testing.T) {
 		t.Fatalf("unresolved netns attachment was not blocked: %+v", plan.Blocked)
 	}
 }
+
+func TestBlockedPlanDoesNotExecute(t *testing.T) {
+	executor := &fakeExecutor{}
+	plan := Plan{Blocked: []Action{{Kind: ActionMap, Identity: "maps/control_map"}}}
+	if err := plan.Execute(context.Background(), executor, false); err == nil {
+		t.Fatal("blocked cleanup plan executed")
+	}
+	if len(executor.calls) != 0 {
+		t.Fatalf("blocked cleanup plan caused side effects: %v", executor.calls)
+	}
+}

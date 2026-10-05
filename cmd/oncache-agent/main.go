@@ -2,15 +2,19 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/cat-cc-Lcos/FNCache/internal/agent"
+	"github.com/cat-cc-Lcos/FNCache/internal/cleanup"
+	"github.com/cat-cc-Lcos/FNCache/internal/config"
 	"github.com/cat-cc-Lcos/FNCache/internal/logging"
 	"github.com/cat-cc-Lcos/FNCache/internal/reconcile"
 	"github.com/cat-cc-Lcos/FNCache/internal/server"
@@ -19,18 +23,27 @@ import (
 func main() {
 	manifest := flag.String("static-config", "", "path to a StaticRuntimeConfiguration manifest")
 	configPath := flag.String("config", "", "path to an AgentConfiguration for dynamic Kubernetes mode")
+	cleanupMode := flag.Bool("cleanup", false, "remove ONCache objects using ownership evidence")
+	dryRun := flag.Bool("dry-run", false, "print a cleanup plan without changing the node")
 	flag.Parse()
 	logger, loggerErr := logging.NewFromEnvironment("oncache-agent")
 	if loggerErr != nil {
 		fmt.Fprintln(os.Stderr, loggerErr)
 		os.Exit(2)
 	}
-	if (*manifest == "") == (*configPath == "") {
+	if *cleanupMode {
+		if *manifest != "" || *configPath == "" {
+			logger.Error(context.Background(), "invalid cleanup command line", "error", "-cleanup requires -config and cannot use -static-config")
+			os.Exit(2)
+		}
+	} else if *dryRun || (*manifest == "") == (*configPath == "") {
 		logger.Error(context.Background(), "invalid command line", "error", "exactly one of -static-config or -config is required")
 		os.Exit(2)
 	}
 	var err error
-	if *manifest != "" {
+	if *cleanupMode {
+		err = runCleanup(*configPath, *dryRun)
+	} else if *manifest != "" {
 		err = run(*manifest)
 	} else {
 		err = runDynamic(*configPath)
@@ -39,6 +52,22 @@ func main() {
 		logger.Error(context.Background(), "agent exited", "error", err.Error())
 		os.Exit(1)
 	}
+}
+
+func runCleanup(path string, dryRun bool) error {
+	cfg, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("load cleanup configuration: %w", err)
+	}
+	plan, runErr := cleanup.Run(context.Background(), cleanup.Options{
+		PinRoot: cfg.PinRoot, StatePath: filepath.Join(cfg.StateDir, "state.json"), InstallationID: cfg.InstallationID,
+		MarkerChain: cfg.Markers.Chain, MarkerComment: cfg.Markers.Comment,
+	}, dryRun)
+	data, marshalErr := json.MarshalIndent(plan, "", "  ")
+	if marshalErr == nil {
+		fmt.Println(string(data))
+	}
+	return errors.Join(runErr, marshalErr)
 }
 
 func runDynamic(path string) error {
