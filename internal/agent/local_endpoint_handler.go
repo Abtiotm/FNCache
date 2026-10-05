@@ -75,7 +75,7 @@ func (h *LocalEndpointHandler) Handle(ctx context.Context, key reconcile.Reconci
 	}
 	snapshot := h.config.Store.Snapshot()
 	pod, ok := snapshot.Pods[key.UID]
-	if !ok || pod.NodeName != h.config.LocalNode || pod.HostNetwork || pod.Deleting {
+	if !ok || pod.NodeName != h.config.LocalNode || pod.HostNetwork || pod.Deleting || isTerminalPodPhase(pod.Phase) {
 		return nil
 	}
 	endpoint, err := h.config.Resolver.Resolve(ctx, pod)
@@ -127,6 +127,10 @@ func (h *LocalEndpointHandler) Handle(ctx context.Context, key reconcile.Reconci
 		return fmt.Errorf("publish local endpoint: %w", err)
 	}
 	return nil
+}
+
+func isTerminalPodPhase(phase string) bool {
+	return phase == "Succeeded" || phase == "Failed"
 }
 
 func (h *LocalEndpointHandler) loadOwnedEndpoint(ctx context.Context, uid string) (reconcile.OwnedEndpoint, bool, error) {

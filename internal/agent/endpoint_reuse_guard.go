@@ -28,7 +28,7 @@ func (g *EndpointReuseGuard) Check(ctx context.Context, snapshot kube.Snapshot, 
 		return reconcile.NewClassifiedError(reconcile.ErrorRetryable, reconcile.ReasonPodIPReusePending, 0, nil)
 	}
 	for uid, pod := range snapshot.Pods {
-		if uid == deletedUID || pod.NodeName != g.localNode || pod.HostNetwork || pod.Deleting {
+		if uid == deletedUID || pod.NodeName != g.localNode || pod.HostNetwork || pod.Deleting || isTerminalPodPhase(pod.Phase) {
 			continue
 		}
 		endpoint, err := g.resolver.Resolve(ctx, pod)
