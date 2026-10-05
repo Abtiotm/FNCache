@@ -52,7 +52,7 @@ func (h *LocalEndpointDeleteHandler) Handle(ctx context.Context, key reconcile.R
 		return nil
 	}
 	snapshot := h.config.Store.Snapshot()
-	if pod, ok := snapshot.Pods[key.UID]; ok && !pod.Deleting && pod.NodeName == h.config.LocalNode {
+	if pod, ok := snapshot.Pods[key.UID]; ok && !pod.Deleting && pod.NodeName == h.config.LocalNode && !isTerminalPodPhase(pod.Phase) {
 		return nil
 	}
 	state, err := h.config.Ownership.Load(ctx)

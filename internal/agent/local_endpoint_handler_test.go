@@ -187,6 +187,39 @@ func TestLocalEndpointHandlerClassifiesNotReadyAndSkipsInvalidPod(t *testing.T) 
 	}
 }
 
+func TestLocalEndpointHandlerSkipsTerminalPods(t *testing.T) {
+	for _, phase := range []string{"Succeeded", "Failed"} {
+		t.Run(phase, func(t *testing.T) {
+			store := kube.NewSnapshotStore()
+			if err := store.UpsertNode(kube.NodeSnapshot{Identity: resolver.NodeIdentity{Name: "node-a", UID: "node-1"}}); err != nil {
+				t.Fatal(err)
+			}
+			pod := handlerPod()
+			pod.Phase = phase
+			if err := store.UpsertPod(pod); err != nil {
+				t.Fatal(err)
+			}
+			events := []string{}
+			control := &localHandlerControl{events: &events}
+			scanner := &localHandlerScanner{events: &events}
+			publisher := &localHandlerPublisher{events: &events}
+			handler, err := NewLocalEndpointHandler(LocalEndpointHandlerConfig{
+				Store: store, Resolver: &localHandlerResolver{events: &events}, LocalNode: "node-a",
+				Desired: &localHandlerDesired{events: &events}, Scanner: scanner, Control: control, Endpoint: &localHandlerEndpoint{events: &events}, Maps: &localHandlerMaps{events: &events}, Remover: localHandlerRemover{}, Publisher: publisher, Generation: testLocalGeneration(control, scanner, publisher),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := handler.Handle(context.Background(), reconcile.ReconcileKey{Kind: reconcile.ReconcileLocalEndpoint, UID: pod.Identity.UID}); err != nil {
+				t.Fatal(err)
+			}
+			if len(events) != 0 {
+				t.Fatalf("terminal Pod triggered endpoint reconciliation: %v", events)
+			}
+		})
+	}
+}
+
 func TestLocalEndpointHandlerCleansSameUIDIdentityChange(t *testing.T) {
 	store := kube.NewSnapshotStore()
 	if err := store.UpsertNode(kube.NodeSnapshot{Identity: resolver.NodeIdentity{Name: "node-a", UID: "node-1"}}); err != nil {

@@ -83,6 +83,25 @@ func TestLocalEndpointDeleteHandlerRemovesAndPublishes(t *testing.T) {
 	}
 }
 
+func TestLocalEndpointDeleteHandlerRemovesTerminalPods(t *testing.T) {
+	for _, phase := range []string{"Succeeded", "Failed"} {
+		t.Run(phase, func(t *testing.T) {
+			events := []string{}
+			publisher := &localHandlerPublisher{events: &events}
+			pod := handlerPod()
+			pod.Phase = phase
+			store := deleteHandlerStore(t, pod)
+			handler := deleteHandler(t, store, &deleteOwnership{state: deleteOwnershipState()}, &events, publisher)
+			if err := handler.Handle(context.Background(), reconcile.ReconcileKey{Kind: reconcile.ReconcileLocalEndpoint, UID: pod.Identity.UID}); err != nil {
+				t.Fatal(err)
+			}
+			if len(publisher.desired.LocalEndpoints) != 0 || len(events) != 6 || events[3] != "remove" {
+				t.Fatalf("terminal Pod endpoint was not removed: desired=%#v events=%v", publisher.desired.LocalEndpoints, events)
+			}
+		})
+	}
+}
+
 func TestLocalEndpointDeleteHandlerSkipsWithoutOwnershipOrForStaleEvent(t *testing.T) {
 	events := []string{}
 	store := deleteHandlerStore(t, handlerPod())
