@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/client-go/tools/cache"
 
 	"github.com/cat-cc-Lcos/FNCache/internal/queue"
 )
@@ -20,11 +19,8 @@ func NewEventDispatcher(source *InformerSource, classifier *EventClassifier, tar
 		return nil, fmt.Errorf("informer source, classifier and queue are required")
 	}
 	d := &EventDispatcher{source: source, classifier: classifier, queue: target}
-	if _, err := source.pods.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{AddFunc: d.addPod, UpdateFunc: d.updatePod, DeleteFunc: d.deletePod}); err != nil {
-		return nil, fmt.Errorf("register Pod dispatch handler: %w", err)
-	}
-	if _, err := source.nodes.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{AddFunc: d.addNode, UpdateFunc: d.updateNode, DeleteFunc: d.deleteNode}); err != nil {
-		return nil, fmt.Errorf("register Node dispatch handler: %w", err)
+	if err := source.attachEventHandlers(d.dispatchPod, d.dispatchNode); err != nil {
+		return nil, fmt.Errorf("attach informer event handlers: %w", err)
 	}
 	return d, nil
 }
