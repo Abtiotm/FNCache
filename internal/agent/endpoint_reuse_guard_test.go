@@ -69,3 +69,23 @@ func TestEndpointReuseGuardRetriesUnreadyCandidate(t *testing.T) {
 		t.Fatalf("unready candidate was not classified as not ready: %v", err)
 	}
 }
+
+func TestEndpointReuseGuardSkipsTerminalCandidates(t *testing.T) {
+	for _, phase := range []string{"Succeeded", "Failed"} {
+		t.Run(phase, func(t *testing.T) {
+			owned := reuseOwned()
+			pod := handlerPod()
+			pod.Identity.UID = "pod-terminal"
+			pod.PodIPv4 = netip.MustParseAddr("10.42.0.3")
+			pod.Phase = phase
+			events := []string{}
+			guard, _ := NewEndpointReuseGuard(&localHandlerResolver{err: resolver.ErrEndpointNotReady, events: &events}, "node-a")
+			if err := guard.Check(context.Background(), reuseSnapshot(pod), owned.PodUID, owned); err != nil {
+				t.Fatalf("terminal candidate blocked cleanup: %v", err)
+			}
+			if len(events) != 0 {
+				t.Fatalf("terminal candidate was resolved: %v", events)
+			}
+		})
+	}
+}
