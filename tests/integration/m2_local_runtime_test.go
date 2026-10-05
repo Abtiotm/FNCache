@@ -228,8 +228,13 @@ func snapshotLocalRuntime(t *testing.T, pinRoot, statePath, markerComment, under
 		}
 	}
 	marker := commandOutput(t, "iptables-nft", "-t", "mangle", "-S")
-	if !strings.Contains(marker, markerComment) {
-		t.Fatalf("marker comment %q is missing from rules: %s", markerComment, marker)
+	markerRule := `-A ONCACHE -m comment --comment "` + markerComment + `"`
+	if !strings.Contains(marker, markerRule) {
+		t.Fatalf("marker rule %q is missing from rules: %s", markerRule, marker)
+	}
+	hook := `-A POSTROUTING -m comment --comment "` + markerComment + `-hook" -j ONCACHE`
+	if !strings.Contains(marker, hook) {
+		t.Fatalf("marker hook %q is missing from rules: %s", hook, marker)
 	}
 	return localRuntimeSnapshot{maps: maps, programs: programs, tc: tc, marker: marker}
 }
