@@ -7,6 +7,7 @@ import (
 
 	"github.com/cat-cc-Lcos/FNCache/internal/discovery"
 	"github.com/cat-cc-Lcos/FNCache/internal/reconcile"
+	"github.com/cat-cc-Lcos/FNCache/internal/resolver"
 )
 
 type generationControl struct {
@@ -73,6 +74,26 @@ func TestGenerationTransactionOrdersDisableMutateVerifyAndPublish(t *testing.T) 
 		if events[i] != want[i] {
 			t.Fatalf("events = %v, want %v", events, want)
 		}
+	}
+}
+
+func TestGenerationTransactionStopsBeforeMutationWhenEndpointScanIsIncomplete(t *testing.T) {
+	desired := publishTestDesired()
+	desired.EndpointScanSkipped = map[string]string{"pod-skipped": resolver.ErrEndpointNotReady.Error()}
+	actual := publishTestActual(desired)
+	events := []string{}
+	transaction := newGenerationTransaction(t, &events, actual, actual)
+
+	err := transaction.Execute(context.Background(), desired, func(_ context.Context, _ reconcile.DesiredState, _ reconcile.ActualState) error {
+		events = append(events, "mutate")
+		return nil
+	})
+	var classified *reconcile.ClassifiedError
+	if !errors.As(err, &classified) || classified.Class() != reconcile.ErrorRetryable || classified.ReasonCode() != reconcile.ReasonEndpointNotReady {
+		t.Fatalf("incomplete endpoint scan was not retryable: err=%v", err)
+	}
+	if len(events) != 1 || events[0] != "disable" {
+		t.Fatalf("incomplete endpoint scan reached mutation: events=%v", events)
 	}
 }
 

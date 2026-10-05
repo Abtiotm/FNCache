@@ -91,9 +91,24 @@ func (p *Publisher) CommitAndPublish(ctx context.Context, desired reconcile.Desi
 	return nil
 }
 
+func validateEndpointScanCompleteness(desired reconcile.DesiredState) error {
+	if len(desired.EndpointScanSkipped) == 0 {
+		return nil
+	}
+	return reconcile.NewClassifiedError(
+		reconcile.ErrorRetryable,
+		reconcile.ReasonEndpointNotReady,
+		0,
+		fmt.Errorf("endpoint scan incomplete: %d endpoint(s) skipped", len(desired.EndpointScanSkipped)),
+	)
+}
+
 func VerifyState(desired reconcile.DesiredState, actual reconcile.ActualState) error {
 	if !desired.Enabled {
 		return fmt.Errorf("cannot publish disabled desired state")
+	}
+	if err := validateEndpointScanCompleteness(desired); err != nil {
+		return err
 	}
 	if !actual.Control.Verified || actual.Control.Enabled {
 		return fmt.Errorf("cannot publish while actual control Map is enabled or unverified")

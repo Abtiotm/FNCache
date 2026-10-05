@@ -90,14 +90,15 @@ type DatapathSpec struct {
 }
 
 type DesiredState struct {
-	Generation      uint64
-	Enabled         bool
-	Capability      discovery.CapabilityReport
-	Flannel         FlannelState
-	LocalPods       map[string]resolver.PodSnapshot
-	LocalEndpoints  map[string]resolver.Endpoint
-	RemoteEndpoints map[netip.Addr]RemoteEndpoint
-	Datapath        DatapathSpec
+	Generation          uint64
+	Enabled             bool
+	Capability          discovery.CapabilityReport
+	Flannel             FlannelState
+	LocalPods           map[string]resolver.PodSnapshot
+	LocalEndpoints      map[string]resolver.Endpoint
+	EndpointScanSkipped map[string]string
+	RemoteEndpoints     map[netip.Addr]RemoteEndpoint
+	Datapath            DatapathSpec
 }
 
 type ActualState struct {

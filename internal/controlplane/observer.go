@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/netip"
 	"strings"
@@ -123,6 +124,19 @@ func (o *Observer) Discover(ctx context.Context) (reconcile.DesiredState, error)
 	if err != nil {
 		return reconcile.DesiredState{}, fmt.Errorf("scan endpoints: %w", err)
 	}
+	for uid, skipErr := range endpoints.Skipped {
+		if !isEndpointScanIncompleteError(skipErr) {
+			continue
+		}
+		if desired.EndpointScanSkipped == nil {
+			desired.EndpointScanSkipped = make(map[string]string)
+		}
+		reason := "endpoint resolution skipped"
+		if skipErr != nil {
+			reason = skipErr.Error()
+		}
+		desired.EndpointScanSkipped[uid] = reason
+	}
 	o.input.TCLinks = resolver.MergeEndpointLinks(o.input.BaseTCLinks, endpoints.Endpoints)
 	for uid, endpoint := range endpoints.Endpoints {
 		desired.LocalEndpoints[uid] = endpoint
@@ -139,6 +153,10 @@ func (o *Observer) Discover(ctx context.Context) (reconcile.DesiredState, error)
 		OverlayFingerprint: config.Fingerprint,
 	}
 	return desired, nil
+}
+
+func isEndpointScanIncompleteError(err error) bool {
+	return errors.Is(err, resolver.ErrEndpointNotReady) || errors.Is(err, resolver.ErrStaleObject)
 }
 
 func (o *Observer) Scan(ctx context.Context) (reconcile.ActualState, error) {

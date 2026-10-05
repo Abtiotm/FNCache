@@ -188,6 +188,45 @@ func TestFirstPassBackendLeavesUnsupportedNodeDisabled(t *testing.T) {
 	}
 }
 
+func TestFirstPassBackendPreservesOwnershipWhenEndpointScanIsIncomplete(t *testing.T) {
+	desired := publishTestDesired()
+	desired.EndpointScanSkipped = map[string]string{"pod-skipped": resolver.ErrEndpointNotReady.Error()}
+	owned := reconcile.OwnedEndpoint{PodUID: "pod-old", PodIPv4: netip.MustParseAddr("10.244.1.11"), NetNSInode: 43, PeerIfIndex: 11, HostIfIndex: 21}
+	store := &fakeOwnershipCommitter{events: new([]string), state: reconcile.OwnershipState{
+		SchemaVersion: 1, InstallationID: "install-a", NodeUID: "node-a", ELFBuildID: "sha256:build", ABI: reconcile.BPFABIVersion,
+		Endpoints: map[string]reconcile.OwnedEndpoint{"pod-old": owned},
+	}}
+	publisher, err := NewPublisher(store, &fakeControlPublisher{events: store.events}, publishTestConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	collection := &backendCollection{}
+	remover := &backendRemover{}
+	backend, err := NewFirstPassBackend(FirstPassBackendConfig{
+		Observer: &backendObserver{desired: desired, actual: publishTestActual(desired)}, Control: &backendControl{},
+		Collection: collection, Marker: &backendMarker{}, Base: &backendEnsurer{}, Endpoint: &backendEnsurer{}, Maps: &backendEnsurer{},
+		Ownership: store, Remover: remover, Publisher: publisher,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator, err := reconcile.NewCoordinator(backend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := coordinator.FullReconcile(context.Background())
+	var classified *reconcile.ClassifiedError
+	if !errors.As(err, &classified) || classified.Class() != reconcile.ErrorRetryable || result.State != reconcile.AgentDisabled {
+		t.Fatalf("incomplete endpoint scan was not blocked safely: result=%+v err=%v", result, err)
+	}
+	if collection.calls != 0 || remover.calls != 0 || len(*store.events) != 0 {
+		t.Fatalf("incomplete endpoint scan performed mutation: collection=%d remover=%d events=%v", collection.calls, remover.calls, *store.events)
+	}
+	if _, ok := store.state.Endpoints[owned.PodUID]; !ok {
+		t.Fatalf("existing ownership was lost: state=%+v", store.state)
+	}
+}
+
 func TestFirstPassBackendStopsBeforeOwnershipOnEnsureFailure(t *testing.T) {
 	desired := publishTestDesired()
 	store := &fakeOwnershipCommitter{events: new([]string)}

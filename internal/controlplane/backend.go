@@ -137,6 +137,9 @@ func (b *FirstPassBackend) Ensure(ctx context.Context, desired reconcile.Desired
 	if !desired.Enabled {
 		return false, nil
 	}
+	if err := validateEndpointScanCompleteness(desired); err != nil {
+		return false, err
+	}
 	ownershipState, hasOwnership, err := b.loadOwnership(ctx)
 	if err != nil {
 		return false, err
@@ -266,6 +269,9 @@ func (b *FirstPassBackend) Commit(ctx context.Context, desired reconcile.Desired
 }
 
 func (b *FirstPassBackend) Publish(ctx context.Context, desired reconcile.DesiredState) error {
+	if err := validateEndpointScanCompleteness(desired); err != nil {
+		return err
+	}
 	if err := b.publisher.checkPublishGuard(ctx); err != nil {
 		return err
 	}

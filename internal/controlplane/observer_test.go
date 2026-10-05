@@ -79,7 +79,7 @@ func TestObserverDiscoverBuildsDesiredState(t *testing.T) {
 	endpoint := testEndpoint()
 	endpoints := &fakeEndpoints{result: resolver.EndpointScanResult{
 		Endpoints: map[string]resolver.Endpoint{endpoint.Pod.UID: endpoint},
-		Skipped:   map[string]error{"pod-pending": resolver.ErrEndpointNotReady},
+		Skipped:   map[string]error{"pod-pending": resolver.ErrEndpointNotReady, "pod-unsupported": resolver.ErrUnsupported},
 	}}
 	input := testInput()
 	observer, err := NewObserver(testSources(preflight, flannelSource, endpoints), input)
@@ -99,6 +99,12 @@ func TestObserverDiscoverBuildsDesiredState(t *testing.T) {
 	}
 	if _, ok := desired.LocalEndpoints["pod-pending"]; ok {
 		t.Fatalf("skipped endpoint was included: %+v", desired.LocalEndpoints)
+	}
+	if reason := desired.EndpointScanSkipped["pod-pending"]; reason != resolver.ErrEndpointNotReady.Error() {
+		t.Fatalf("skipped endpoint was not propagated: got=%q", reason)
+	}
+	if _, ok := desired.EndpointScanSkipped["pod-unsupported"]; ok {
+		t.Fatalf("unsupported endpoint incorrectly blocked publication: %#v", desired.EndpointScanSkipped)
 	}
 	if !reflect.DeepEqual(endpoints.pods, input.Pods) {
 		t.Fatalf("unexpected endpoint inputs: got=%+v want=%+v", endpoints.pods, input.Pods)

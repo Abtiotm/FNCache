@@ -44,6 +44,20 @@ func TestEndpointScannerCollectsReadyEndpoints(t *testing.T) {
 	}
 }
 
+func TestEndpointScannerIgnoresDeletingAndHostNetworkPods(t *testing.T) {
+	deleting := scanPod("pod-deleting", "1")
+	deleting.Deleting = true
+	hostNetwork := scanPod("pod-host", "1")
+	hostNetwork.HostNetwork = true
+	fake := &fakeEndpointResolver{endpoints: map[string]Endpoint{}, errors: map[string]error{}}
+	scanner, _ := NewEndpointScanner(fake)
+
+	result, err := scanner.Scan(context.Background(), []PodSnapshot{deleting, hostNetwork})
+	if err != nil || len(result.Endpoints) != 0 || len(result.Skipped) != 0 || fake.calls != 0 {
+		t.Fatalf("ignored endpoint candidates were resolved: result=%+v err=%v calls=%d", result, err, fake.calls)
+	}
+}
+
 func TestEndpointScannerSkipsRecoverableEndpointErrors(t *testing.T) {
 	resolver := &fakeEndpointResolver{endpoints: map[string]Endpoint{"pod-a": scanEndpoint("pod-a")}, errors: map[string]error{"pod-b": ErrEndpointNotReady, "pod-c": ErrStaleObject, "pod-d": ErrUnsupported}}
 	scanner, _ := NewEndpointScanner(resolver)

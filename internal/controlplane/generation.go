@@ -42,6 +42,9 @@ func (t *GenerationTransaction) Execute(ctx context.Context, desired reconcile.D
 	if err := t.control.Disable(ctx); err != nil {
 		return fmt.Errorf("disable fast path: %w", err)
 	}
+	if err := validateEndpointScanCompleteness(desired); err != nil {
+		return err
+	}
 	before, err := t.scanner.Scan(ctx)
 	if err != nil {
 		return fmt.Errorf("scan before generation mutation: %w", err)
