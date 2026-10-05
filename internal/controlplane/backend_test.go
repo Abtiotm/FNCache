@@ -113,6 +113,45 @@ func TestFirstPassBackendRunsAllStagesAndPublishesLastScan(t *testing.T) {
 	}
 }
 
+func TestFirstPassBackendRechecksPublishGuardBeforeControlPublish(t *testing.T) {
+	desired := publishTestDesired()
+	events := []string{}
+	store := &fakeOwnershipCommitter{events: &events}
+	publish := &fakeControlPublisher{events: &events}
+	publisher, err := NewPublisher(store, publish, publishTestConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantErr := errors.New("Kubernetes state became stale")
+	checks := 0
+	publisher.SetPublishGuard(func(context.Context) error {
+		checks++
+		if checks == 2 {
+			return wantErr
+		}
+		return nil
+	})
+	backend, err := NewFirstPassBackend(FirstPassBackendConfig{
+		Observer: &backendObserver{desired: desired, actual: publishTestActual(desired)}, Control: &backendControl{},
+		Collection: &backendCollection{}, Marker: &backendMarker{}, Base: &backendEnsurer{}, Endpoint: &backendEnsurer{}, Maps: &backendEnsurer{},
+		Ownership: store, Remover: &backendRemover{}, Publisher: publisher,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator, err := reconcile.NewCoordinator(backend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := coordinator.FullReconcile(context.Background())
+	if !errors.Is(err, wantErr) || result.State != reconcile.AgentDisabled {
+		t.Fatalf("stale publish was not rejected: result=%+v err=%v", result, err)
+	}
+	if checks != 2 || len(events) != 1 || events[0] != "commit" {
+		t.Fatalf("stale state reached control publish: checks=%d events=%v", checks, events)
+	}
+}
+
 func TestFirstPassBackendLeavesUnsupportedNodeDisabled(t *testing.T) {
 	desired := publishTestDesired()
 	desired.Enabled = false

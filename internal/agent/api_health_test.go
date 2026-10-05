@@ -33,6 +33,23 @@ func newAPIHealthMonitor(t *testing.T, source APIHealthSource, now time.Time) *A
 	return monitor
 }
 
+func TestAPIHealthMonitorFreshUsesLastSuccessfulProbe(t *testing.T) {
+	source := &fakeAPIHealthSource{health: kube.APIHealth{Synced: true, LastProbeAt: time.Unix(100, 0)}}
+	if err := newAPIHealthMonitor(t, source, time.Unix(100, int64(500*time.Millisecond))).Fresh(context.Background()); err != nil {
+		t.Fatalf("fresh API was rejected: %v", err)
+	}
+	stale := newAPIHealthMonitor(t, source, time.Unix(102, 0))
+	if err := stale.Fresh(context.Background()); !errors.Is(err, ErrKubernetesAPIStale) {
+		t.Fatalf("stale API error = %v, want ErrKubernetesAPIStale", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := stale.Fresh(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled freshness check = %v, want context.Canceled", err)
+	}
+}
+
 func TestAPIHealthMonitorAllowsRecentProbeFailure(t *testing.T) {
 	source := &fakeAPIHealthSource{health: kube.APIHealth{Synced: true, LastProbeAt: time.Unix(100, 0)}, probeErr: errors.New("temporary API failure")}
 	if err := newAPIHealthMonitor(t, source, time.Unix(100, int64(500*time.Millisecond))).Check(context.Background()); err != nil {

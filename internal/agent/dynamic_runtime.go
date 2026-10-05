@@ -370,6 +370,7 @@ func (r *DynamicRuntime) initializeDatapath(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("create dynamic datapath components: %w", err)
 	}
+	components.publisher.SetPublishGuard(r.apiHealth.Fresh)
 	heartbeatControl, ok := components.control.(HeartbeatControl)
 	if !ok {
 		_ = components.Close()

@@ -99,6 +99,53 @@ func TestPublisherCommitsOwnershipBeforePublishing(t *testing.T) {
 	}
 }
 
+func TestPublisherBlocksWhenPublishGuardFailsBeforeCommit(t *testing.T) {
+	desired := publishTestDesired()
+	actual := publishTestActual(desired)
+	events := []string{}
+	store := &fakeOwnershipCommitter{events: &events}
+	control := &fakeControlPublisher{events: &events}
+	publisher, err := NewPublisher(store, control, publishTestConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantErr := errors.New("Kubernetes state is stale")
+	publisher.SetPublishGuard(func(context.Context) error { return wantErr })
+	if err := publisher.CommitAndPublish(context.Background(), desired, actual); !errors.Is(err, wantErr) {
+		t.Fatalf("publish guard error = %v, want %v", err, wantErr)
+	}
+	if len(events) != 0 {
+		t.Fatalf("stale state reached ownership or control publish: %v", events)
+	}
+}
+
+func TestPublisherRechecksPublishGuardBeforeControlPublish(t *testing.T) {
+	desired := publishTestDesired()
+	actual := publishTestActual(desired)
+	events := []string{}
+	store := &fakeOwnershipCommitter{events: &events}
+	control := &fakeControlPublisher{events: &events}
+	publisher, err := NewPublisher(store, control, publishTestConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantErr := errors.New("Kubernetes state became stale")
+	checks := 0
+	publisher.SetPublishGuard(func(context.Context) error {
+		checks++
+		if checks == 2 {
+			return wantErr
+		}
+		return nil
+	})
+	if err := publisher.CommitAndPublish(context.Background(), desired, actual); !errors.Is(err, wantErr) {
+		t.Fatalf("publish guard error = %v, want %v", err, wantErr)
+	}
+	if checks != 2 || len(events) != 1 || events[0] != "commit" {
+		t.Fatalf("publish guard did not stop control publish: checks=%d events=%v", checks, events)
+	}
+}
+
 func TestPublisherDoesNotCommitWhenVerificationFails(t *testing.T) {
 	desired := publishTestDesired()
 	actual := publishTestActual(desired)
