@@ -12,9 +12,10 @@ import (
 )
 
 type backendObserver struct {
-	desired reconcile.DesiredState
-	actual  reconcile.ActualState
-	scans   int
+	desired        reconcile.DesiredState
+	actual         reconcile.ActualState
+	actualSequence []reconcile.ActualState
+	scans          int
 }
 
 func (f *backendObserver) Discover(context.Context) (reconcile.DesiredState, error) {
@@ -22,6 +23,13 @@ func (f *backendObserver) Discover(context.Context) (reconcile.DesiredState, err
 }
 func (f *backendObserver) Scan(context.Context) (reconcile.ActualState, error) {
 	f.scans++
+	if len(f.actualSequence) != 0 {
+		index := f.scans - 1
+		if index >= len(f.actualSequence) {
+			index = len(f.actualSequence) - 1
+		}
+		return f.actualSequence[index], nil
+	}
 	return f.actual, nil
 }
 
@@ -256,6 +264,44 @@ func TestFirstPassBackendStopsBeforeMutationWhenActualScanIsIncomplete(t *testin
 	}
 	if collection.calls != 0 || len(*store.events) != 0 {
 		t.Fatalf("incomplete actual scan performed mutation: collection=%d events=%v", collection.calls, *store.events)
+	}
+}
+
+func TestFirstPassBackendStopsBeforeDownstreamMutationWhenRescanIsIncomplete(t *testing.T) {
+	desired := publishTestDesired()
+	first := publishTestActual(desired)
+	second := publishTestActual(desired)
+	second.EndpointScanSkipped = map[string]string{"pod-skipped": resolver.ErrEndpointNotReady.Error()}
+	observer := &backendObserver{desired: desired, actualSequence: []reconcile.ActualState{first, second}}
+	store := &fakeOwnershipCommitter{events: new([]string)}
+	publisher, err := NewPublisher(store, &fakeControlPublisher{events: store.events}, publishTestConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	collection := &backendCollection{}
+	marker := &backendMarker{}
+	base := &backendEnsurer{}
+	endpoint := &backendEnsurer{}
+	maps := &backendEnsurer{}
+	remover := &backendRemover{}
+	backend, err := NewFirstPassBackend(FirstPassBackendConfig{
+		Observer: observer, Control: &backendControl{}, Collection: collection, Marker: marker,
+		Base: base, Endpoint: endpoint, Maps: maps, Ownership: store, Remover: remover, Publisher: publisher,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator, err := reconcile.NewCoordinator(backend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := coordinator.FullReconcile(context.Background())
+	var classified *reconcile.ClassifiedError
+	if !errors.As(err, &classified) || classified.Class() != reconcile.ErrorRetryable || result.State != reconcile.AgentDisabled {
+		t.Fatalf("incomplete rescan was not blocked safely: result=%+v err=%v", result, err)
+	}
+	if observer.scans < 2 || base.calls != 0 || endpoint.calls != 0 || maps.calls != 0 || remover.calls != 0 || len(*store.events) != 0 {
+		t.Fatalf("incomplete rescan reached downstream mutation: scans=%d base=%d endpoint=%d maps=%d remover=%d events=%v", observer.scans, base.calls, endpoint.calls, maps.calls, remover.calls, *store.events)
 	}
 }
 

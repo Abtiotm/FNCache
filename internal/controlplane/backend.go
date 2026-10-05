@@ -165,6 +165,9 @@ func (b *FirstPassBackend) Ensure(ctx context.Context, desired reconcile.Desired
 	if err != nil {
 		return changed, fmt.Errorf("rescan after collection ensure: %w", err)
 	}
+	if err := validateActualEndpointScanCompleteness(current); err != nil {
+		return changed, err
+	}
 	cleanupChanged, err := b.cleanupStaleEndpoints(ctx, desired, current, ownershipState, hasOwnership)
 	if err != nil {
 		return changed || cleanupChanged, fmt.Errorf("cleanup stale endpoints: %w", err)
