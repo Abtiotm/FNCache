@@ -47,13 +47,14 @@ type Sources struct {
 }
 
 type ObservationInput struct {
-	Generation       uint64
-	PreflightRequest discovery.PreflightRequest
-	FlannelRequest   flannel.DiscoveryRequest
-	MarkerRule       flannel.MarkerRuleSpec
-	Pods             []resolver.PodSnapshot
-	TCLinks          []resolver.LinkIdentity
-	BaseTCLinks      []resolver.LinkIdentity
+	Generation          uint64
+	PreflightRequest    discovery.PreflightRequest
+	FlannelRequest      flannel.DiscoveryRequest
+	MarkerRule          flannel.MarkerRuleSpec
+	Pods                []resolver.PodSnapshot
+	TCLinks             []resolver.LinkIdentity
+	BaseTCLinks         []resolver.LinkIdentity
+	EndpointScanSkipped map[string]error
 }
 
 type Observer struct {
@@ -91,6 +92,7 @@ func NewObserver(sources Sources, input ObservationInput) (*Observer, error) {
 		baseTCLinks = input.TCLinks
 	}
 	input.BaseTCLinks = append([]resolver.LinkIdentity(nil), baseTCLinks...)
+	input.EndpointScanSkipped = cloneEndpointScanErrors(input.EndpointScanSkipped)
 	return &Observer{sources: sources, input: input}, nil
 }
 
@@ -124,19 +126,8 @@ func (o *Observer) Discover(ctx context.Context) (reconcile.DesiredState, error)
 	if err != nil {
 		return reconcile.DesiredState{}, fmt.Errorf("scan endpoints: %w", err)
 	}
-	for uid, skipErr := range endpoints.Skipped {
-		if !isEndpointScanIncompleteError(skipErr) {
-			continue
-		}
-		if desired.EndpointScanSkipped == nil {
-			desired.EndpointScanSkipped = make(map[string]string)
-		}
-		reason := "endpoint resolution skipped"
-		if skipErr != nil {
-			reason = skipErr.Error()
-		}
-		desired.EndpointScanSkipped[uid] = reason
-	}
+	o.input.EndpointScanSkipped = cloneEndpointScanErrors(endpoints.Skipped)
+	desired.EndpointScanSkipped = endpointScanReasons(endpoints.Skipped)
 	o.input.TCLinks = resolver.MergeEndpointLinks(o.input.BaseTCLinks, endpoints.Endpoints)
 	for uid, endpoint := range endpoints.Endpoints {
 		desired.LocalEndpoints[uid] = endpoint
@@ -159,6 +150,38 @@ func isEndpointScanIncompleteError(err error) bool {
 	return errors.Is(err, resolver.ErrEndpointNotReady) || errors.Is(err, resolver.ErrStaleObject)
 }
 
+func cloneEndpointScanErrors(skipped map[string]error) map[string]error {
+	if len(skipped) == 0 {
+		return nil
+	}
+	result := make(map[string]error, len(skipped))
+	for uid, err := range skipped {
+		result[uid] = err
+	}
+	return result
+}
+
+func endpointScanReasons(skipped map[string]error) map[string]string {
+	if len(skipped) == 0 {
+		return nil
+	}
+	result := make(map[string]string)
+	for uid, skipErr := range skipped {
+		if !isEndpointScanIncompleteError(skipErr) {
+			continue
+		}
+		reason := "endpoint resolution skipped"
+		if skipErr != nil {
+			reason = skipErr.Error()
+		}
+		result[uid] = reason
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
 func (o *Observer) Scan(ctx context.Context) (reconcile.ActualState, error) {
 	if err := ctx.Err(); err != nil {
 		return reconcile.ActualState{}, err
@@ -176,6 +199,7 @@ func (o *Observer) Scan(ctx context.Context) (reconcile.ActualState, error) {
 	if actual.ScannedAt.IsZero() {
 		actual.ScannedAt = tc.ScannedAt
 	}
+	actual.EndpointScanSkipped = endpointScanReasons(o.input.EndpointScanSkipped)
 	actual.FlannelRule, err = o.sources.Rules.Scan(ctx, o.input.MarkerRule)
 	if err != nil {
 		return reconcile.ActualState{}, fmt.Errorf("scan Flannel rule: %w", err)

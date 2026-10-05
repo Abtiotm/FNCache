@@ -227,6 +227,38 @@ func TestFirstPassBackendPreservesOwnershipWhenEndpointScanIsIncomplete(t *testi
 	}
 }
 
+func TestFirstPassBackendStopsBeforeMutationWhenActualScanIsIncomplete(t *testing.T) {
+	desired := publishTestDesired()
+	actual := publishTestActual(desired)
+	actual.EndpointScanSkipped = map[string]string{"pod-skipped": resolver.ErrEndpointNotReady.Error()}
+	store := &fakeOwnershipCommitter{events: new([]string)}
+	publisher, err := NewPublisher(store, &fakeControlPublisher{events: store.events}, publishTestConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	collection := &backendCollection{}
+	backend, err := NewFirstPassBackend(FirstPassBackendConfig{
+		Observer: &backendObserver{desired: desired, actual: actual}, Control: &backendControl{},
+		Collection: collection, Marker: &backendMarker{}, Base: &backendEnsurer{}, Endpoint: &backendEnsurer{}, Maps: &backendEnsurer{},
+		Ownership: store, Remover: &backendRemover{}, Publisher: publisher,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator, err := reconcile.NewCoordinator(backend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := coordinator.FullReconcile(context.Background())
+	var classified *reconcile.ClassifiedError
+	if !errors.As(err, &classified) || classified.Class() != reconcile.ErrorRetryable || result.State != reconcile.AgentDisabled {
+		t.Fatalf("incomplete actual scan was not blocked safely: result=%+v err=%v", result, err)
+	}
+	if collection.calls != 0 || len(*store.events) != 0 {
+		t.Fatalf("incomplete actual scan performed mutation: collection=%d events=%v", collection.calls, *store.events)
+	}
+}
+
 func TestFirstPassBackendStopsBeforeOwnershipOnEnsureFailure(t *testing.T) {
 	desired := publishTestDesired()
 	store := &fakeOwnershipCommitter{events: new([]string)}

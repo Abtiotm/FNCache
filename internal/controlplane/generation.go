@@ -49,6 +49,9 @@ func (t *GenerationTransaction) Execute(ctx context.Context, desired reconcile.D
 	if err != nil {
 		return fmt.Errorf("scan before generation mutation: %w", err)
 	}
+	if err := validateActualEndpointScanCompleteness(before); err != nil {
+		return err
+	}
 	if desired.Generation < before.Control.Generation {
 		return fmt.Errorf("%w: got %d want at least %d", ErrStaleGeneration, desired.Generation, before.Control.Generation)
 	}

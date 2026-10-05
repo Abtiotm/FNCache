@@ -140,6 +140,9 @@ func (b *FirstPassBackend) Ensure(ctx context.Context, desired reconcile.Desired
 	if err := validateEndpointScanCompleteness(desired); err != nil {
 		return false, err
 	}
+	if err := validateActualEndpointScanCompleteness(actual); err != nil {
+		return false, err
+	}
 	ownershipState, hasOwnership, err := b.loadOwnership(ctx)
 	if err != nil {
 		return false, err

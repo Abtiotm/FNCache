@@ -146,6 +146,26 @@ func TestObserverScanMergesReadSideState(t *testing.T) {
 	}
 }
 
+func TestObserverScanPropagatesEndpointScanSkipped(t *testing.T) {
+	sources := testSources(&fakePreflight{report: discovery.CapabilityReport{Supported: true}}, &fakeFlannel{config: testFlannelConfig()}, &fakeEndpoints{})
+	input := testInput()
+	input.EndpointScanSkipped = map[string]error{"pod-a": resolver.ErrEndpointNotReady, "pod-unsupported": resolver.ErrUnsupported}
+	observer, err := NewObserver(sources, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual, err := observer.Scan(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reason := actual.EndpointScanSkipped["pod-a"]; reason != resolver.ErrEndpointNotReady.Error() {
+		t.Fatalf("endpoint scan skip was not propagated to actual state: got=%q", reason)
+	}
+	if _, ok := actual.EndpointScanSkipped["pod-unsupported"]; ok {
+		t.Fatalf("unsupported endpoint incorrectly marked incomplete: %#v", actual.EndpointScanSkipped)
+	}
+}
+
 func TestObserverRefreshesTCLinksAfterEndpointRediscovery(t *testing.T) {
 	endpoint := testEndpoint()
 	base := resolver.LinkIdentity{IfIndex: 2, IfName: "eth0"}

@@ -102,14 +102,15 @@ type DesiredState struct {
 }
 
 type ActualState struct {
-	ScannedAt   time.Time
-	Control     ControlState
-	Programs    map[string]ProgramState
-	Maps        map[string]MapState
-	Attachments []AttachmentState
-	FlannelRule RuleState
-	Orphans     []OwnedObject
-	Conflicts   []discovery.Conflict
+	ScannedAt           time.Time
+	EndpointScanSkipped map[string]string
+	Control             ControlState
+	Programs            map[string]ProgramState
+	Maps                map[string]MapState
+	Attachments         []AttachmentState
+	FlannelRule         RuleState
+	Orphans             []OwnedObject
+	Conflicts           []discovery.Conflict
 }
 
 type OwnershipState struct {

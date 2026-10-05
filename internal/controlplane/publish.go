@@ -91,16 +91,24 @@ func (p *Publisher) CommitAndPublish(ctx context.Context, desired reconcile.Desi
 	return nil
 }
 
-func validateEndpointScanCompleteness(desired reconcile.DesiredState) error {
-	if len(desired.EndpointScanSkipped) == 0 {
+func endpointScanCompletenessError(skipped map[string]string) error {
+	if len(skipped) == 0 {
 		return nil
 	}
 	return reconcile.NewClassifiedError(
 		reconcile.ErrorRetryable,
 		reconcile.ReasonEndpointNotReady,
 		0,
-		fmt.Errorf("endpoint scan incomplete: %d endpoint(s) skipped", len(desired.EndpointScanSkipped)),
+		fmt.Errorf("endpoint scan incomplete: %d endpoint(s) skipped", len(skipped)),
 	)
+}
+
+func validateEndpointScanCompleteness(desired reconcile.DesiredState) error {
+	return endpointScanCompletenessError(desired.EndpointScanSkipped)
+}
+
+func validateActualEndpointScanCompleteness(actual reconcile.ActualState) error {
+	return endpointScanCompletenessError(actual.EndpointScanSkipped)
 }
 
 func VerifyState(desired reconcile.DesiredState, actual reconcile.ActualState) error {
@@ -108,6 +116,9 @@ func VerifyState(desired reconcile.DesiredState, actual reconcile.ActualState) e
 		return fmt.Errorf("cannot publish disabled desired state")
 	}
 	if err := validateEndpointScanCompleteness(desired); err != nil {
+		return err
+	}
+	if err := validateActualEndpointScanCompleteness(actual); err != nil {
 		return err
 	}
 	if !actual.Control.Verified || actual.Control.Enabled {

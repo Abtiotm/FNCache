@@ -97,6 +97,26 @@ func TestGenerationTransactionStopsBeforeMutationWhenEndpointScanIsIncomplete(t 
 	}
 }
 
+func TestGenerationTransactionStopsBeforeMutationWhenActualScanIsIncomplete(t *testing.T) {
+	desired := publishTestDesired()
+	before := publishTestActual(desired)
+	before.EndpointScanSkipped = map[string]string{"pod-skipped": resolver.ErrEndpointNotReady.Error()}
+	events := []string{}
+	transaction := newGenerationTransaction(t, &events, before, publishTestActual(desired))
+
+	err := transaction.Execute(context.Background(), desired, func(_ context.Context, _ reconcile.DesiredState, _ reconcile.ActualState) error {
+		events = append(events, "mutate")
+		return nil
+	})
+	var classified *reconcile.ClassifiedError
+	if !errors.As(err, &classified) || classified.Class() != reconcile.ErrorRetryable || classified.ReasonCode() != reconcile.ReasonEndpointNotReady {
+		t.Fatalf("incomplete actual scan was not retryable: err=%v", err)
+	}
+	if len(events) != 2 || events[0] != "disable" || events[1] != "scan" {
+		t.Fatalf("incomplete actual scan reached mutation: events=%v", events)
+	}
+}
+
 func TestGenerationTransactionRejectsStaleAndMutationFailure(t *testing.T) {
 	desired := publishTestDesired()
 	before := publishTestActual(desired)
