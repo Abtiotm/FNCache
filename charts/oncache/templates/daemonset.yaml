@@ -59,20 +59,20 @@ spec:
               protocol: TCP
           securityContext:
             privileged: {{ .Values.security.privileged }}
-            readOnlyRootFilesystem: {{ .Values.security.readOnlyRootFilesystem }}
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            seccompProfile:
+              type: RuntimeDefault
             capabilities:
+              drop:
+                - ALL
               add:
                 {{- toYaml .Values.security.capabilities.add | nindent 16 }}
           volumeMounts:
             - name: bpf
               mountPath: /sys/fs/bpf
-            - name: boot
-              mountPath: /boot
-              readOnly: true
-            - name: run
-              mountPath: /run
-            - name: proc
-              mountPath: /host/proc
+            - name: containerd
+              mountPath: /run/k3s/containerd
               readOnly: true
             - name: state
               mountPath: /var/lib/oncache
@@ -105,17 +105,9 @@ spec:
           hostPath:
             path: {{ .Values.hostPaths.bpf }}
             type: Directory
-        - name: boot
+        - name: containerd
           hostPath:
-            path: {{ .Values.hostPaths.boot }}
-            type: Directory
-        - name: run
-          hostPath:
-            path: {{ .Values.hostPaths.run }}
-            type: Directory
-        - name: proc
-          hostPath:
-            path: {{ .Values.hostPaths.proc }}
+            path: {{ .Values.hostPaths.containerd }}
             type: Directory
         - name: state
           hostPath:

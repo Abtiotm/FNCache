@@ -57,7 +57,6 @@ rbac:
 
 security:
   privileged: false
-  readOnlyRootFilesystem: true
   capabilities:
     add:
       - BPF
@@ -68,9 +67,7 @@ hostPID: true
 
 hostPaths:
   bpf: /sys/fs/bpf
-  boot: /boot
-  run: /run
-  proc: /proc
+  containerd: /run/k3s/containerd
   state: /var/lib/oncache
   flannel: /run/flannel
   toolsBin: /opt/oncache/bin
