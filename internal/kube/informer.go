@@ -17,17 +17,20 @@ import (
 )
 
 type InformerSource struct {
-	factory      informers.SharedInformerFactory
-	pods         coreinformers.PodInformer
-	nodes        coreinformers.NodeInformer
-	client       kubernetes.Interface
-	store        *SnapshotStore
-	errMu        sync.RWMutex
-	lastErr      error
-	healthMu     sync.RWMutex
-	synced       bool
-	lastProbeAt  time.Time
-	lastProbeErr error
+	factory          informers.SharedInformerFactory
+	pods             coreinformers.PodInformer
+	nodes            coreinformers.NodeInformer
+	client           kubernetes.Interface
+	store            *SnapshotStore
+	errMu            sync.RWMutex
+	lastErr          error
+	healthMu         sync.RWMutex
+	synced           bool
+	lastProbeAt      time.Time
+	lastProbeErr     error
+	eventMu          sync.RWMutex
+	podEventHandler  func(interface{}, interface{})
+	nodeEventHandler func(interface{}, interface{})
 }
 
 func NewInformerSource(client kubernetes.Interface, store *SnapshotStore, resyncPeriod time.Duration) (*InformerSource, error) {
@@ -54,6 +57,38 @@ func NewInformerSource(client kubernetes.Interface, store *SnapshotStore, resync
 		return nil, fmt.Errorf("register Node informer handler: %w", err)
 	}
 	return source, nil
+}
+
+func (s *InformerSource) attachEventHandlers(podHandler, nodeHandler func(interface{}, interface{})) error {
+	if podHandler == nil || nodeHandler == nil {
+		return fmt.Errorf("Pod and Node event handlers are required")
+	}
+	s.eventMu.Lock()
+	defer s.eventMu.Unlock()
+	if s.podEventHandler != nil || s.nodeEventHandler != nil {
+		return fmt.Errorf("informer event handlers are already attached")
+	}
+	s.podEventHandler = podHandler
+	s.nodeEventHandler = nodeHandler
+	return nil
+}
+
+func (s *InformerSource) notifyPodEvent(oldObj, newObj interface{}) {
+	s.eventMu.RLock()
+	handler := s.podEventHandler
+	s.eventMu.RUnlock()
+	if handler != nil {
+		handler(oldObj, newObj)
+	}
+}
+
+func (s *InformerSource) notifyNodeEvent(oldObj, newObj interface{}) {
+	s.eventMu.RLock()
+	handler := s.nodeEventHandler
+	s.eventMu.RUnlock()
+	if handler != nil {
+		handler(oldObj, newObj)
+	}
 }
 
 func (s *InformerSource) Run(ctx context.Context) {
@@ -96,7 +131,10 @@ func (s *InformerSource) recordError(err error) {
 	s.errMu.Unlock()
 }
 
-func (s *InformerSource) addPod(obj interface{}) { s.upsertPod(obj) }
+func (s *InformerSource) addPod(obj interface{}) {
+	s.upsertPod(obj)
+	s.notifyPodEvent(nil, obj)
+}
 
 func (s *InformerSource) updatePod(oldObj, newObj interface{}) {
 	oldPod, err := podObject(oldObj)
@@ -113,6 +151,7 @@ func (s *InformerSource) updatePod(oldObj, newObj interface{}) {
 		s.store.DeletePod(string(oldPod.UID))
 	}
 	s.upsertPod(newPod)
+	s.notifyPodEvent(oldObj, newObj)
 }
 
 func (s *InformerSource) deletePod(obj interface{}) {
@@ -122,6 +161,7 @@ func (s *InformerSource) deletePod(obj interface{}) {
 		return
 	}
 	s.store.DeletePod(string(pod.UID))
+	s.notifyPodEvent(obj, nil)
 }
 
 func (s *InformerSource) upsertPod(obj interface{}) {
@@ -138,7 +178,10 @@ func (s *InformerSource) upsertPod(obj interface{}) {
 	}
 }
 
-func (s *InformerSource) addNode(obj interface{}) { s.upsertNode(obj) }
+func (s *InformerSource) addNode(obj interface{}) {
+	s.upsertNode(obj)
+	s.notifyNodeEvent(nil, obj)
+}
 
 func (s *InformerSource) updateNode(oldObj, newObj interface{}) {
 	oldNode, err := nodeObject(oldObj)
@@ -155,6 +198,7 @@ func (s *InformerSource) updateNode(oldObj, newObj interface{}) {
 		s.store.DeleteNode(oldNode.Name, string(oldNode.UID))
 	}
 	s.upsertNode(newNode)
+	s.notifyNodeEvent(oldObj, newObj)
 }
 
 func (s *InformerSource) deleteNode(obj interface{}) {
@@ -164,6 +208,7 @@ func (s *InformerSource) deleteNode(obj interface{}) {
 		return
 	}
 	s.store.DeleteNode(node.Name, string(node.UID))
+	s.notifyNodeEvent(obj, nil)
 }
 
 func (s *InformerSource) upsertNode(obj interface{}) {
