@@ -80,7 +80,7 @@ func TestLocalEndpointHandlerPendingPodReturnsRetryable(t *testing.T) {
 	handler, err := NewLocalEndpointHandler(LocalEndpointHandlerConfig{
 		Store: retryHandlerStore(t, pod), Resolver: &sequenceEndpointResolver{errors: []error{resolver.ErrEndpointNotReady}, endpoint: handlerEndpoint("pod-1")}, LocalNode: "node-a",
 		Desired: &localHandlerDesired{desired: reconcile.DesiredState{Enabled: true, Capability: discovery.CapabilityReport{Supported: true}}, events: &events},
-		Scanner: scanner, Control: control, Endpoint: &localHandlerEndpoint{events: &events}, Maps: &localHandlerMaps{events: &events}, Remover: localHandlerRemover{}, Publisher: publisher, Generation: testLocalGeneration(control, scanner, publisher),
+		Scanner: scanner, Control: control, Endpoint: &localHandlerEndpoint{events: &events}, Maps: &localHandlerMaps{events: &events}, Remover: localHandlerRemover{}, Ownership: &localHandlerOwnership{}, Publisher: publisher, Generation: testLocalGeneration(control, scanner, publisher),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -102,7 +102,7 @@ func TestLocalEndpointHandlerRetriesSandboxUntilReady(t *testing.T) {
 	handler, err := NewLocalEndpointHandler(LocalEndpointHandlerConfig{
 		Store: retryHandlerStore(t, pod), Resolver: resolver, LocalNode: "node-a",
 		Desired: &localHandlerDesired{desired: reconcile.DesiredState{Enabled: true, Capability: discovery.CapabilityReport{Supported: true}}, events: &events},
-		Scanner: scanner, Control: control, Endpoint: &localHandlerEndpoint{events: &events}, Maps: &localHandlerMaps{events: &events}, Remover: localHandlerRemover{}, Publisher: publisher, Generation: testLocalGeneration(control, scanner, publisher),
+		Scanner: scanner, Control: control, Endpoint: &localHandlerEndpoint{events: &events}, Maps: &localHandlerMaps{events: &events}, Remover: localHandlerRemover{}, Ownership: &localHandlerOwnership{}, Publisher: publisher, Generation: testLocalGeneration(control, scanner, publisher),
 	})
 	if err != nil {
 		t.Fatal(err)

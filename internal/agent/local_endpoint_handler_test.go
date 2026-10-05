@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"os"
 	"reflect"
 	"testing"
 
@@ -34,6 +35,15 @@ type localHandlerDesired struct {
 func (s *localHandlerDesired) Desired(context.Context) (reconcile.DesiredState, error) {
 	*s.events = append(*s.events, "desired")
 	return s.desired, nil
+}
+
+type localHandlerOwnership struct {
+	state reconcile.OwnershipState
+	err   error
+}
+
+func (s *localHandlerOwnership) Load(context.Context) (reconcile.OwnershipState, error) {
+	return s.state, s.err
 }
 
 type localHandlerScanner struct {
@@ -103,10 +113,14 @@ func (localHandlerRemover) Remove(context.Context, reconcile.OwnedEndpoint, reco
 	return nil
 }
 
-type recordingLocalHandlerRemover struct{ calls int }
+type recordingLocalHandlerRemover struct {
+	calls int
+	owned []reconcile.OwnedEndpoint
+}
 
-func (r *recordingLocalHandlerRemover) Remove(context.Context, reconcile.OwnedEndpoint, reconcile.ActualState, reconcile.DesiredState) error {
+func (r *recordingLocalHandlerRemover) Remove(_ context.Context, owned reconcile.OwnedEndpoint, _ reconcile.ActualState, _ reconcile.DesiredState) error {
 	r.calls++
+	r.owned = append(r.owned, owned)
 	return nil
 }
 
@@ -147,7 +161,7 @@ func TestLocalEndpointHandlerCreatesAndPublishesEndpoint(t *testing.T) {
 	publisher := &localHandlerPublisher{events: &events}
 	control := &localHandlerControl{events: &events}
 	scanner := &localHandlerScanner{events: &events}
-	handler, err := NewLocalEndpointHandler(LocalEndpointHandlerConfig{Store: store, Resolver: &localHandlerResolver{endpoint: handlerEndpoint("pod-1"), events: &events}, LocalNode: "node-a", Desired: &localHandlerDesired{desired: base, events: &events}, Scanner: scanner, Control: control, Endpoint: &localHandlerEndpoint{events: &events}, Maps: &localHandlerMaps{events: &events}, Remover: localHandlerRemover{}, Publisher: publisher, Generation: testLocalGeneration(control, scanner, publisher)})
+	handler, err := NewLocalEndpointHandler(LocalEndpointHandlerConfig{Store: store, Resolver: &localHandlerResolver{endpoint: handlerEndpoint("pod-1"), events: &events}, LocalNode: "node-a", Desired: &localHandlerDesired{desired: base, events: &events}, Scanner: scanner, Control: control, Endpoint: &localHandlerEndpoint{events: &events}, Maps: &localHandlerMaps{events: &events}, Remover: localHandlerRemover{}, Ownership: &localHandlerOwnership{err: os.ErrNotExist}, Publisher: publisher, Generation: testLocalGeneration(control, scanner, publisher)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +185,7 @@ func TestLocalEndpointHandlerClassifiesNotReadyAndSkipsInvalidPod(t *testing.T) 
 	control := &localHandlerControl{events: &events}
 	scanner := &localHandlerScanner{events: &events}
 	publisher := &localHandlerPublisher{events: &events}
-	handler, _ := NewLocalEndpointHandler(LocalEndpointHandlerConfig{Store: store, Resolver: &localHandlerResolver{err: resolver.ErrEndpointNotReady, events: &events}, LocalNode: "node-a", Desired: &localHandlerDesired{events: &events}, Scanner: scanner, Control: control, Endpoint: &localHandlerEndpoint{events: &events}, Maps: &localHandlerMaps{events: &events}, Remover: localHandlerRemover{}, Publisher: publisher, Generation: testLocalGeneration(control, scanner, publisher)})
+	handler, _ := NewLocalEndpointHandler(LocalEndpointHandlerConfig{Store: store, Resolver: &localHandlerResolver{err: resolver.ErrEndpointNotReady, events: &events}, LocalNode: "node-a", Desired: &localHandlerDesired{events: &events}, Scanner: scanner, Control: control, Endpoint: &localHandlerEndpoint{events: &events}, Maps: &localHandlerMaps{events: &events}, Remover: localHandlerRemover{}, Ownership: &localHandlerOwnership{}, Publisher: publisher, Generation: testLocalGeneration(control, scanner, publisher)})
 	err := handler.Handle(context.Background(), reconcile.ReconcileKey{Kind: reconcile.ReconcileLocalEndpoint, UID: "pod-1"})
 	var classified *reconcile.ClassifiedError
 	if !errors.As(err, &classified) || classified.Class() != reconcile.ErrorRetryable || len(events) != 1 {
@@ -206,10 +220,13 @@ func TestLocalEndpointHandlerCleansSameUIDIdentityChange(t *testing.T) {
 	scanner := &localHandlerScanner{events: &events}
 	control := &localHandlerControl{events: &events}
 	publisher := &localHandlerPublisher{events: &events}
+	ownership := &localHandlerOwnership{state: reconcile.OwnershipState{Endpoints: map[string]reconcile.OwnedEndpoint{
+		"pod-1": {PodUID: "pod-1", PodIPv4: old.PodIPv4, NetNSInode: old.NetNSInode, PeerIfIndex: old.PeerLink.IfIndex, HostIfIndex: old.HostLink.IfIndex},
+	}}}
 	handler, err := NewLocalEndpointHandler(LocalEndpointHandlerConfig{
 		Store: store, Resolver: &localHandlerResolver{endpoint: current, events: &events}, LocalNode: "node-a",
-		Desired: &localHandlerDesired{desired: reconcile.DesiredState{Enabled: true, Capability: discovery.CapabilityReport{Supported: true}, LocalEndpoints: map[string]resolver.Endpoint{"pod-1": old}}, events: &events},
-		Scanner: scanner, Control: control, Endpoint: &localHandlerEndpoint{events: &events}, Maps: &localHandlerMaps{events: &events}, Remover: remover, Publisher: publisher, Generation: testLocalGeneration(control, scanner, publisher),
+		Desired: &localHandlerDesired{desired: reconcile.DesiredState{Enabled: true, Capability: discovery.CapabilityReport{Supported: true}, LocalEndpoints: map[string]resolver.Endpoint{"pod-1": current}}, events: &events},
+		Scanner: scanner, Control: control, Endpoint: &localHandlerEndpoint{events: &events}, Maps: &localHandlerMaps{events: &events}, Remover: remover, Ownership: ownership, Publisher: publisher, Generation: testLocalGeneration(control, scanner, publisher),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -217,7 +234,7 @@ func TestLocalEndpointHandlerCleansSameUIDIdentityChange(t *testing.T) {
 	if err := handler.Handle(context.Background(), reconcile.ReconcileKey{Kind: reconcile.ReconcileLocalEndpoint, UID: "pod-1"}); err != nil {
 		t.Fatal(err)
 	}
-	if remover.calls != 1 || scanner.calls != 3 {
+	if remover.calls != 1 || scanner.calls != 3 || len(remover.owned) != 1 || remover.owned[0].PodIPv4 != old.PodIPv4 || remover.owned[0].PeerIfIndex != old.PeerLink.IfIndex || remover.owned[0].HostIfIndex != old.HostLink.IfIndex {
 		t.Fatalf("same-UID identity change did not refresh state after cleanup: remover=%d scans=%d events=%v", remover.calls, scanner.calls, events)
 	}
 }

@@ -1,10 +1,10 @@
 package agent
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/cat-cc-Lcos/FNCache/internal/controlplane"
 	"github.com/cat-cc-Lcos/FNCache/internal/kube"
@@ -50,6 +50,7 @@ type LocalEndpointHandlerConfig struct {
 	Endpoint   localEndpointEnsurer
 	Maps       localMapEnsurer
 	Remover    localEndpointRemover
+	Ownership  localOwnershipSource
 	Publisher  localPublisher
 	Generation localGenerationTransaction
 }
@@ -59,7 +60,7 @@ type LocalEndpointHandler struct {
 }
 
 func NewLocalEndpointHandler(config LocalEndpointHandlerConfig) (*LocalEndpointHandler, error) {
-	if config.Store == nil || config.Resolver == nil || config.LocalNode == "" || config.Desired == nil || config.Scanner == nil || config.Control == nil || config.Endpoint == nil || config.Maps == nil || config.Remover == nil || config.Publisher == nil || config.Generation == nil {
+	if config.Store == nil || config.Resolver == nil || config.LocalNode == "" || config.Desired == nil || config.Scanner == nil || config.Control == nil || config.Endpoint == nil || config.Maps == nil || config.Remover == nil || config.Ownership == nil || config.Publisher == nil || config.Generation == nil {
 		return nil, fmt.Errorf("local endpoint handler dependencies are required")
 	}
 	return &LocalEndpointHandler{config: config}, nil
@@ -100,9 +101,13 @@ func (h *LocalEndpointHandler) Handle(ctx context.Context, key reconcile.Reconci
 	if err != nil {
 		return fmt.Errorf("build local desired state: %w", err)
 	}
+	previous, hasPrevious, err := h.loadOwnedEndpoint(ctx, pod.Identity.UID)
+	if err != nil {
+		return err
+	}
 	if err := h.config.Generation.Execute(ctx, desired, func(ctx context.Context, desired reconcile.DesiredState, actual reconcile.ActualState) error {
-		if previous, ok := base.LocalEndpoints[pod.Identity.UID]; ok && endpointIdentityChanged(previous, endpoint) {
-			if err := h.config.Remover.Remove(ctx, ownedEndpointFromResolver(previous), actual, desired); err != nil {
+		if hasPrevious && ownedEndpointIdentityChanged(previous, endpoint) {
+			if err := h.config.Remover.Remove(ctx, previous, actual, desired); err != nil {
 				return fmt.Errorf("remove previous local endpoint identity: %w", err)
 			}
 			var err error
@@ -124,18 +129,21 @@ func (h *LocalEndpointHandler) Handle(ctx context.Context, key reconcile.Reconci
 	return nil
 }
 
-func endpointIdentityChanged(previous, current resolver.Endpoint) bool {
-	return previous.Pod != current.Pod || previous.Node != current.Node || previous.PodIPv4 != current.PodIPv4 ||
-		previous.NetNSInode != current.NetNSInode || !sameLocalLinkIdentity(previous.PeerLink, current.PeerLink) ||
-		!sameLocalLinkIdentity(previous.HostLink, current.HostLink)
+func (h *LocalEndpointHandler) loadOwnedEndpoint(ctx context.Context, uid string) (reconcile.OwnedEndpoint, bool, error) {
+	state, err := h.config.Ownership.Load(ctx)
+	if errors.Is(err, os.ErrNotExist) {
+		return reconcile.OwnedEndpoint{}, false, nil
+	}
+	if err != nil {
+		return reconcile.OwnedEndpoint{}, false, fmt.Errorf("load local endpoint ownership: %w", err)
+	}
+	owned, ok := state.Endpoints[uid]
+	return owned, ok, nil
 }
 
-func sameLocalLinkIdentity(previous, current resolver.LinkIdentity) bool {
-	return previous.NetNSInode == current.NetNSInode && previous.IfIndex == current.IfIndex && previous.IfName == current.IfName && bytes.Equal(previous.MAC, current.MAC)
-}
-
-func ownedEndpointFromResolver(endpoint resolver.Endpoint) reconcile.OwnedEndpoint {
-	return reconcile.OwnedEndpoint{PodUID: endpoint.Pod.UID, PodIPv4: endpoint.PodIPv4, NetNSInode: endpoint.NetNSInode, PeerIfIndex: endpoint.PeerLink.IfIndex, HostIfIndex: endpoint.HostLink.IfIndex}
+func ownedEndpointIdentityChanged(previous reconcile.OwnedEndpoint, current resolver.Endpoint) bool {
+	return previous.PodUID != current.Pod.UID || previous.PodIPv4 != current.PodIPv4 || previous.NetNSInode != current.NetNSInode ||
+		previous.PeerIfIndex != current.PeerLink.IfIndex || previous.HostIfIndex != current.HostLink.IfIndex
 }
 
 func classifyEndpointError(err error) error {
