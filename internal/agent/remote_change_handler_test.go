@@ -40,7 +40,9 @@ func remoteChangeStore(t *testing.T) *kube.SnapshotStore {
 func newRemoteChangeHandler(t *testing.T, store *kube.SnapshotStore, maps *remoteMaps, events *[]string, publisher *localHandlerPublisher) *RemoteChangeHandler {
 	t.Helper()
 	base := reconcile.DesiredState{Enabled: true, Capability: discovery.CapabilityReport{Supported: true}}
-	handler, err := NewRemoteChangeHandler(RemoteChangeHandlerConfig{Store: store, LocalNode: "node-a", Desired: &localHandlerDesired{desired: base, events: events}, Scanner: &localHandlerScanner{events: events}, Control: &localHandlerControl{events: events}, Maps: maps, Publisher: publisher})
+	control := &localHandlerControl{events: events}
+	scanner := &localHandlerScanner{events: events}
+	handler, err := NewRemoteChangeHandler(RemoteChangeHandlerConfig{Store: store, LocalNode: "node-a", Desired: &localHandlerDesired{desired: base, events: events}, Maps: maps, Generation: testLocalGeneration(control, scanner, publisher)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +57,7 @@ func TestRemoteChangeHandlerInvalidatesAndPublishesLatestMapping(t *testing.T) {
 	if err := handler.Handle(context.Background(), reconcile.ReconcileKey{Kind: reconcile.ReconcileRemoteEndpoint, UID: "pod-remote"}); err != nil {
 		t.Fatal(err)
 	}
-	if len(maps.calls) != 3 || events[0] != "disable" || events[1] != "scan" || events[2] != "desired" || events[3] != "publish" {
+	if len(maps.calls) != 3 || len(events) != 5 || events[0] != "desired" || events[1] != "disable" || events[2] != "scan" || events[3] != "scan" || events[4] != "publish" {
 		t.Fatalf("unexpected invalidation order: maps=%v events=%v", maps.calls, events)
 	}
 	remote, ok := publisher.desired.RemoteEndpoints[netip.MustParseAddr("10.42.1.2")]
@@ -68,7 +70,7 @@ func TestRemoteChangeHandlerGlobalEventAndFailure(t *testing.T) {
 	events := []string{}
 	maps := &remoteMaps{err: errors.New("clear failed")}
 	handler := newRemoteChangeHandler(t, remoteChangeStore(t), maps, &events, &localHandlerPublisher{events: &events})
-	if err := handler.Handle(context.Background(), reconcile.ReconcileKey{Kind: reconcile.ReconcileGlobal}); err == nil || len(events) != 1 || len(maps.calls) != 1 {
+	if err := handler.Handle(context.Background(), reconcile.ReconcileKey{Kind: reconcile.ReconcileGlobal}); err == nil || len(events) != 3 || events[0] != "desired" || events[1] != "disable" || events[2] != "scan" || len(maps.calls) != 1 {
 		t.Fatalf("clear failure was not contained: err=%v maps=%v events=%v", err, maps.calls, events)
 	}
 	if err := handler.Handle(context.Background(), reconcile.ReconcileKey{Kind: reconcile.ReconcileLocalEndpoint}); err != nil {

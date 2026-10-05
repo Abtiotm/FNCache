@@ -29,6 +29,7 @@ type linkJSON struct {
 		InfoData struct {
 			ID   uint32 `json:"id"`
 			Port uint16 `json:"port"`
+			Link string `json:"link"`
 		} `json:"info_data"`
 	} `json:"linkinfo"`
 }
@@ -73,8 +74,11 @@ func (d *Discovery) Discover(ctx context.Context, req DiscoveryRequest) (Flannel
 	}
 	vxlanLink := vxlan[0]
 	underlayName := req.UnderlayDevice
-	if underlayName == "" {
+	if underlayName == "" || underlayName == "auto" {
 		underlayName = vxlanLink.Link
+		if underlayName == "" {
+			underlayName = vxlanLink.LinkInfo.InfoData.Link
+		}
 	}
 	if underlayName == "" {
 		return FlannelConfig{}, fmt.Errorf("Flannel underlay device is missing")

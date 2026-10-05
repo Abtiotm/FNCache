@@ -14,13 +14,11 @@ type remoteMapInvalidator interface {
 }
 
 type RemoteChangeHandlerConfig struct {
-	Store     *kube.SnapshotStore
-	LocalNode string
-	Desired   localDesiredSource
-	Scanner   localStateScanner
-	Control   localControl
-	Maps      remoteMapInvalidator
-	Publisher localPublisher
+	Store      *kube.SnapshotStore
+	LocalNode  string
+	Desired    localDesiredSource
+	Maps       remoteMapInvalidator
+	Generation localGenerationTransaction
 }
 
 type RemoteChangeHandler struct {
@@ -28,7 +26,7 @@ type RemoteChangeHandler struct {
 }
 
 func NewRemoteChangeHandler(config RemoteChangeHandlerConfig) (*RemoteChangeHandler, error) {
-	if config.Store == nil || config.LocalNode == "" || config.Desired == nil || config.Scanner == nil || config.Control == nil || config.Maps == nil || config.Publisher == nil {
+	if config.Store == nil || config.LocalNode == "" || config.Desired == nil || config.Maps == nil || config.Generation == nil {
 		return nil, fmt.Errorf("remote change handler dependencies are required")
 	}
 	return &RemoteChangeHandler{config: config}, nil
@@ -40,18 +38,6 @@ func (h *RemoteChangeHandler) Handle(ctx context.Context, key reconcile.Reconcil
 	}
 	if key.Kind != reconcile.ReconcileRemoteEndpoint && key.Kind != reconcile.ReconcileGlobal {
 		return nil
-	}
-	if err := h.config.Control.Disable(ctx); err != nil {
-		return fmt.Errorf("disable fast path for remote change: %w", err)
-	}
-	for _, name := range []string{"egressip_cache", "egress_cache", "policy_cache"} {
-		if _, err := h.config.Maps.Clear(ctx, name); err != nil {
-			return fmt.Errorf("clear %s for remote change: %w", name, err)
-		}
-	}
-	actual, err := h.config.Scanner.Scan(ctx)
-	if err != nil {
-		return fmt.Errorf("scan after remote cache invalidation: %w", err)
 	}
 	base, err := h.config.Desired.Desired(ctx)
 	if err != nil {
@@ -71,7 +57,14 @@ func (h *RemoteChangeHandler) Handle(ctx context.Context, key reconcile.Reconcil
 	if err != nil {
 		return fmt.Errorf("build desired state after remote change: %w", err)
 	}
-	if err := h.config.Publisher.CommitAndPublish(ctx, desired, actual); err != nil {
+	if err := h.config.Generation.Execute(ctx, desired, func(ctx context.Context, _ reconcile.DesiredState, _ reconcile.ActualState) error {
+		for _, name := range []string{"egressip_cache", "egress_cache", "policy_cache"} {
+			if _, err := h.config.Maps.Clear(ctx, name); err != nil {
+				return fmt.Errorf("clear %s for remote change: %w", name, err)
+			}
+		}
+		return nil
+	}); err != nil {
 		return fmt.Errorf("publish remote change: %w", err)
 	}
 	return nil

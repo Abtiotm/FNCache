@@ -194,3 +194,10 @@ func TestRuleFingerprintNormalizesWhitespace(t *testing.T) {
 func markerHookRuleLine(spec MarkerRuleSpec) string {
 	return strings.Join(append([]string{"-A", markerHookChain}, markerHookRuleArgs(spec)...), " ")
 }
+
+func TestExpectedMarkerFingerprintUsesCanonicalRule(t *testing.T) {
+	spec := MarkerRuleSpec{Chain: "ONCACHE", Comment: "oncache:install-a"}
+	if ExpectedMarkerFingerprint(spec) != ruleFingerprint(markerRuleLine(spec)) {
+		t.Fatal("expected marker fingerprint does not match canonical rule")
+	}
+}

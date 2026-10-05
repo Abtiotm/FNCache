@@ -74,10 +74,13 @@ func TestLocalEndpointHandlerPendingPodReturnsRetryable(t *testing.T) {
 	pod := handlerPod()
 	pod.Phase, pod.PodIPv4 = "Pending", netip.Addr{}
 	events := []string{}
+	control := &localHandlerControl{events: &events}
+	scanner := &localHandlerScanner{events: &events}
+	publisher := &localHandlerPublisher{events: &events}
 	handler, err := NewLocalEndpointHandler(LocalEndpointHandlerConfig{
 		Store: retryHandlerStore(t, pod), Resolver: &sequenceEndpointResolver{errors: []error{resolver.ErrEndpointNotReady}, endpoint: handlerEndpoint("pod-1")}, LocalNode: "node-a",
 		Desired: &localHandlerDesired{desired: reconcile.DesiredState{Enabled: true, Capability: discovery.CapabilityReport{Supported: true}}, events: &events},
-		Scanner: &localHandlerScanner{events: &events}, Control: &localHandlerControl{events: &events}, Endpoint: &localHandlerEndpoint{events: &events}, Maps: &localHandlerMaps{events: &events}, Remover: localHandlerRemover{}, Publisher: &localHandlerPublisher{events: &events},
+		Scanner: scanner, Control: control, Endpoint: &localHandlerEndpoint{events: &events}, Maps: &localHandlerMaps{events: &events}, Remover: localHandlerRemover{}, Publisher: publisher, Generation: testLocalGeneration(control, scanner, publisher),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -94,10 +97,12 @@ func TestLocalEndpointHandlerRetriesSandboxUntilReady(t *testing.T) {
 	events := []string{}
 	resolver := &sequenceEndpointResolver{errors: []error{resolver.ErrEndpointNotReady, resolver.ErrEndpointNotReady}, endpoint: handlerEndpoint("pod-1")}
 	publisher := &retryPublisher{done: make(chan struct{}), events: &events}
+	control := &localHandlerControl{events: &events}
+	scanner := &localHandlerScanner{events: &events}
 	handler, err := NewLocalEndpointHandler(LocalEndpointHandlerConfig{
 		Store: retryHandlerStore(t, pod), Resolver: resolver, LocalNode: "node-a",
 		Desired: &localHandlerDesired{desired: reconcile.DesiredState{Enabled: true, Capability: discovery.CapabilityReport{Supported: true}}, events: &events},
-		Scanner: &localHandlerScanner{events: &events}, Control: &localHandlerControl{events: &events}, Endpoint: &localHandlerEndpoint{events: &events}, Maps: &localHandlerMaps{events: &events}, Remover: localHandlerRemover{}, Publisher: publisher,
+		Scanner: scanner, Control: control, Endpoint: &localHandlerEndpoint{events: &events}, Maps: &localHandlerMaps{events: &events}, Remover: localHandlerRemover{}, Publisher: publisher, Generation: testLocalGeneration(control, scanner, publisher),
 	})
 	if err != nil {
 		t.Fatal(err)

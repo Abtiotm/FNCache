@@ -2,8 +2,8 @@ package reconcile
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"sync"
 )
 
 // ReconcileBackend keeps orchestration independent from kernel and runtime APIs.
@@ -19,28 +19,25 @@ type ReconcileBackend interface {
 
 type Reconciler interface {
 	FullReconcile(context.Context) (ReconcileResult, error)
+	Stop(context.Context) error
 	State() AgentState
 }
 
 type Coordinator struct {
-	backend ReconcileBackend
-	gate    chan struct{}
-
-	stateMu sync.RWMutex
-	state   AgentState
+	backend   ReconcileBackend
+	gate      chan struct{}
+	lifecycle *AgentStateMachine
 }
 
 func NewCoordinator(backend ReconcileBackend) (*Coordinator, error) {
 	if backend == nil {
 		return nil, fmt.Errorf("reconcile backend is required")
 	}
-	return &Coordinator{backend: backend, gate: make(chan struct{}, 1), state: AgentBootstrapping}, nil
+	return &Coordinator{backend: backend, gate: make(chan struct{}, 1), lifecycle: NewAgentStateMachine()}, nil
 }
 
 func (c *Coordinator) State() AgentState {
-	c.stateMu.RLock()
-	defer c.stateMu.RUnlock()
-	return c.state
+	return c.lifecycle.State()
 }
 
 func (c *Coordinator) FullReconcile(ctx context.Context) (ReconcileResult, error) {
@@ -55,7 +52,10 @@ func (c *Coordinator) FullReconcile(ctx context.Context) (ReconcileResult, error
 		return result, ctx.Err()
 	}
 
-	c.setState(AgentReconciling)
+	if err := c.transitionTo(AgentReconciling); err != nil {
+		result.State = c.State()
+		return result, err
+	}
 	result.State = AgentReconciling
 	if err := c.runStage(ctx, &result, "disable", func() error { return c.backend.Disable(ctx) }); err != nil {
 		return c.fail(result, err, false)
@@ -66,7 +66,10 @@ func (c *Coordinator) FullReconcile(ctx context.Context) (ReconcileResult, error
 	}
 	if !desired.Enabled {
 		result.Generation = desired.Generation
-		c.setState(AgentDisabled)
+		if err := c.transitionTo(AgentDisabled); err != nil {
+			result.State = c.State()
+			return result, err
+		}
 		result.State = AgentDisabled
 		return result, nil
 	}
@@ -96,9 +99,31 @@ func (c *Coordinator) FullReconcile(ctx context.Context) (ReconcileResult, error
 
 	result.Generation = desired.Generation
 	result.Changed = changed
-	c.setState(AgentReady)
+	if err := c.transitionTo(AgentReady); err != nil {
+		result.State = c.State()
+		return result, err
+	}
 	result.State = AgentReady
 	return result, nil
+}
+
+// Stop serializes shutdown with an in-flight reconciliation and moves a
+// healthy or degraded agent into the terminal Stopping state.
+func (c *Coordinator) Stop(ctx context.Context) error {
+	if ctx == nil {
+		return fmt.Errorf("stop context is required")
+	}
+	select {
+	case c.gate <- struct{}{}:
+		defer func() { <-c.gate }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	if c.State() == AgentStopping {
+		return nil
+	}
+	return c.transitionTo(AgentStopping)
 }
 
 func (c *Coordinator) discover(ctx context.Context, result *ReconcileResult) (DesiredState, error) {
@@ -146,13 +171,14 @@ func (c *Coordinator) fail(result ReconcileResult, err error, disableConfirmed b
 	if disableConfirmed {
 		state = AgentDisabled
 	}
-	c.setState(state)
+	if transitionErr := c.transitionTo(state); transitionErr != nil {
+		result.State = c.State()
+		return result, errors.Join(err, transitionErr)
+	}
 	result.State = state
 	return result, err
 }
 
-func (c *Coordinator) setState(state AgentState) {
-	c.stateMu.Lock()
-	c.state = state
-	c.stateMu.Unlock()
+func (c *Coordinator) transitionTo(state AgentState) error {
+	return c.lifecycle.Transition(state)
 }

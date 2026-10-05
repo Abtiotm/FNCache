@@ -55,7 +55,7 @@ func TestM3KubernetesE2E(t *testing.T) {
 	}
 	waitPod(t, "pod-a")
 	waitPod(t, "pod-b")
-	captureEvidence(t, evidence)
+	captureEvidence(t, e2eNamespace, "oncache-e2e-oncache", evidence)
 	podBIP := mustOutput(t, "kubectl", "-n", e2eNamespace, "get", "pod", "pod-b", "-o", "jsonpath={.status.podIP}")
 	if _, err := run("kubectl", "-n", e2eNamespace, "exec", "pod-a", "--", "ping", "-c", "3", "-W", "2", podBIP); err != nil {
 		t.Fatal(err)
@@ -93,7 +93,7 @@ func TestM3KubernetesE2E(t *testing.T) {
 		}
 		waitPodDeleted(t, "pod-churn")
 	}
-	captureEvidence(t, evidence)
+	captureEvidence(t, e2eNamespace, "oncache-e2e-oncache", evidence)
 }
 
 func assertNodesReady(nodes ...string) error {
@@ -138,12 +138,12 @@ func waitPodDeleted(t *testing.T, name string) {
 	t.Fatalf("Pod %s was not deleted", name)
 }
 
-func captureEvidence(t *testing.T, dir string) {
+func captureEvidence(t *testing.T, namespace, daemonset, dir string) {
 	t.Helper()
 	artifacts := map[string][]string{
 		"nodes.txt":     {"kubectl", "get", "nodes", "-o", "wide"},
-		"pods.txt":      {"kubectl", "-n", e2eNamespace, "get", "pods", "-o", "wide"},
-		"daemonset.txt": {"kubectl", "-n", "kube-system", "get", "daemonset", "oncache-e2e-oncache", "-o", "yaml"},
+		"pods.txt":      {"kubectl", "-n", namespace, "get", "pods", "-o", "wide"},
+		"daemonset.txt": {"kubectl", "-n", "kube-system", "get", "daemonset", daemonset, "-o", "yaml"},
 	}
 	for name, args := range artifacts {
 		output, err := run(args[0], args[1:]...)

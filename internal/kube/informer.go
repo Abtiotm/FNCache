@@ -17,12 +17,17 @@ import (
 )
 
 type InformerSource struct {
-	factory informers.SharedInformerFactory
-	pods    coreinformers.PodInformer
-	nodes   coreinformers.NodeInformer
-	store   *SnapshotStore
-	errMu   sync.RWMutex
-	lastErr error
+	factory      informers.SharedInformerFactory
+	pods         coreinformers.PodInformer
+	nodes        coreinformers.NodeInformer
+	client       kubernetes.Interface
+	store        *SnapshotStore
+	errMu        sync.RWMutex
+	lastErr      error
+	healthMu     sync.RWMutex
+	synced       bool
+	lastProbeAt  time.Time
+	lastProbeErr error
 }
 
 func NewInformerSource(client kubernetes.Interface, store *SnapshotStore, resyncPeriod time.Duration) (*InformerSource, error) {
@@ -33,7 +38,7 @@ func NewInformerSource(client kubernetes.Interface, store *SnapshotStore, resync
 		return nil, fmt.Errorf("resync period cannot be negative")
 	}
 	factory := informers.NewSharedInformerFactory(client, resyncPeriod)
-	source := &InformerSource{factory: factory, pods: factory.Core().V1().Pods(), nodes: factory.Core().V1().Nodes(), store: store}
+	source := &InformerSource{factory: factory, pods: factory.Core().V1().Pods(), nodes: factory.Core().V1().Nodes(), client: client, store: store}
 	if _, err := source.pods.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    source.addPod,
 		UpdateFunc: source.updatePod,
@@ -66,6 +71,11 @@ func (s *InformerSource) WaitForSync(ctx context.Context) error {
 	if err := s.LastError(); err != nil {
 		return fmt.Errorf("snapshot synchronization failed: %w", err)
 	}
+	s.healthMu.Lock()
+	s.synced = true
+	s.lastProbeAt = time.Now()
+	s.lastProbeErr = nil
+	s.healthMu.Unlock()
 	return nil
 }
 

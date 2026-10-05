@@ -21,6 +21,7 @@ spec:
     spec:
       serviceAccountName: {{ include "oncache.serviceAccountName" . }}
       hostNetwork: true
+      hostPID: {{ .Values.hostPID }}
       dnsPolicy: ClusterFirstWithHostNet
       terminationGracePeriodSeconds: 30
       nodeSelector:
@@ -46,6 +47,8 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            - name: PATH
+              value: /opt/oncache/bin:/opt/oncache/sbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
             - name: ONCACHE_CONFIG
               value: /etc/oncache/agent.yaml
             - name: ONCACHE_INSTALLATION_ID
@@ -56,22 +59,31 @@ spec:
               protocol: TCP
           securityContext:
             privileged: {{ .Values.security.privileged }}
-            readOnlyRootFilesystem: {{ .Values.security.readOnlyRootFilesystem }}
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            seccompProfile:
+              type: RuntimeDefault
             capabilities:
+              drop:
+                - ALL
               add:
                 {{- toYaml .Values.security.capabilities.add | nindent 16 }}
           volumeMounts:
             - name: bpf
               mountPath: /sys/fs/bpf
-            - name: run
-              mountPath: /run
-            - name: proc
-              mountPath: /host/proc
+            - name: containerd
+              mountPath: /run/k3s/containerd
               readOnly: true
             - name: state
               mountPath: /var/lib/oncache
             - name: flannel
               mountPath: /run/flannel
+              readOnly: true
+            - name: tools-bin
+              mountPath: /opt/oncache/bin
+              readOnly: true
+            - name: tools-sbin
+              mountPath: /opt/oncache/sbin
               readOnly: true
             - name: config
               mountPath: /etc/oncache
@@ -93,13 +105,9 @@ spec:
           hostPath:
             path: {{ .Values.hostPaths.bpf }}
             type: Directory
-        - name: run
+        - name: containerd
           hostPath:
-            path: {{ .Values.hostPaths.run }}
-            type: Directory
-        - name: proc
-          hostPath:
-            path: {{ .Values.hostPaths.proc }}
+            path: {{ .Values.hostPaths.containerd }}
             type: Directory
         - name: state
           hostPath:
@@ -108,6 +116,14 @@ spec:
         - name: flannel
           hostPath:
             path: {{ .Values.hostPaths.flannel }}
+            type: Directory
+        - name: tools-bin
+          hostPath:
+            path: {{ .Values.hostPaths.toolsBin }}
+            type: Directory
+        - name: tools-sbin
+          hostPath:
+            path: {{ .Values.hostPaths.toolsSbin }}
             type: Directory
         - name: config
           configMap:

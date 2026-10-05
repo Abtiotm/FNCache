@@ -3,6 +3,7 @@ package datapath
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -203,6 +204,60 @@ func TestControlWriterPublishEnablesNewGeneration(t *testing.T) {
 	if fake.updated.Enabled != 1 || fake.updated.Generation != 42 || fake.updated.HeartbeatNS != 100 ||
 		fake.updated.HeartbeatTimeoutNS != 500 || fake.updated.Flags != 3 || fake.updated.Reserved != 0 {
 		t.Fatalf("unexpected published control state: %+v", fake.updated)
+	}
+}
+
+func TestControlWriterRefreshHeartbeatPreservesControlState(t *testing.T) {
+	mapValue := ControlV1{ABIVersion: 1, Enabled: 1, Generation: 42, HeartbeatNS: 100, HeartbeatTimeoutNS: 500, Flags: 3, Reserved: 7}
+	fake := &fakeControlMap{value: mapValue}
+	writer, err := newControlWriter(t.TempDir(), func(string) (controlMap, error) { return fake, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.RefreshHeartbeat(context.Background(), 900); err != nil {
+		t.Fatal(err)
+	}
+	want := mapValue
+	want.HeartbeatNS = 900
+	if fake.updated != want {
+		t.Fatalf("heartbeat refresh changed unrelated control state: got=%+v want=%+v", fake.updated, want)
+	}
+}
+
+func TestControlWriterRefreshHeartbeatRejectsInvalidState(t *testing.T) {
+	tests := []struct {
+		name      string
+		value     ControlV1
+		lookupErr error
+		updateErr error
+		want      string
+	}{
+		{name: "ABI mismatch", value: ControlV1{ABIVersion: 2}, want: "ABI mismatch"},
+		{name: "disabled", value: ControlV1{ABIVersion: 1}, want: "control Map is not ready"},
+		{name: "lookup failure", lookupErr: errors.New("lookup failed"), want: "read control Map"},
+		{name: "update failure", value: ControlV1{ABIVersion: 1, Enabled: 1}, updateErr: errors.New("update failed"), want: "refresh heartbeat"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fake := &fakeControlMap{value: test.value, lookupErr: test.lookupErr, updateErr: test.updateErr}
+			writer, err := newControlWriter(t.TempDir(), func(string) (controlMap, error) { return fake, nil })
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := writer.RefreshHeartbeat(context.Background(), 900); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("unexpected heartbeat refresh error: %v", err)
+			}
+		})
+	}
+}
+
+func TestControlWriterRefreshHeartbeatClassifiesMissingMap(t *testing.T) {
+	writer, err := newControlWriter(t.TempDir(), func(string) (controlMap, error) { return nil, os.ErrNotExist })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.RefreshHeartbeat(context.Background(), 900); !errors.Is(err, ErrControlMapNotReady) {
+		t.Fatalf("error = %v, want ErrControlMapNotReady", err)
 	}
 }
 

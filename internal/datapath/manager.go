@@ -1,6 +1,7 @@
 package datapath
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -71,6 +72,68 @@ func (m *Manager) MapPinPath(name string) (string, error) {
 
 func (m *Manager) ProgramPinPath(name string) (string, error) {
 	return m.pinPath("programs", name)
+}
+
+func (m *Manager) RemovePinnedMap(ctx context.Context, name string, expectedID uint32) error {
+	path, err := m.MapPinPath(name)
+	if err != nil {
+		return err
+	}
+	return removePinnedMap(ctx, path, name, expectedID)
+}
+
+func (m *Manager) RemovePinnedProgram(ctx context.Context, name string, expectedID uint32) error {
+	path, err := m.ProgramPinPath(name)
+	if err != nil {
+		return err
+	}
+	return removePinnedProgram(ctx, path, name, expectedID)
+}
+
+func removePinnedMap(ctx context.Context, path, name string, expectedID uint32) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	object, err := ebpf.LoadPinnedMap(path, nil)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	info, err := object.Info()
+	object.Close()
+	if err != nil {
+		return err
+	}
+	id, ok := info.ID()
+	if !ok || uint32(id) != expectedID {
+		return fmt.Errorf("Map %s ID changed before cleanup", name)
+	}
+	return os.Remove(path)
+}
+
+func removePinnedProgram(ctx context.Context, path, name string, expectedID uint32) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	object, err := ebpf.LoadPinnedProgram(path, nil)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	info, err := object.Info()
+	object.Close()
+	if err != nil {
+		return err
+	}
+	id, ok := info.ID()
+	if !ok || uint32(id) != expectedID {
+		return fmt.Errorf("program %s ID changed before cleanup", name)
+	}
+	return os.Remove(path)
 }
 
 func (m *Manager) LoadAndPin(spec *ebpf.CollectionSpec, schema CollectionSchema) (*LoadedCollection, error) {

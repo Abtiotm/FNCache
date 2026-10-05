@@ -30,6 +30,26 @@ func NewEndpointRemover(maps EndpointMapRemover, tc EndpointFilterRemover) (*End
 	return &EndpointRemover{maps: maps, tc: tc}, nil
 }
 
+func (r *EndpointRemover) RemoveOwnedAttachment(ctx context.Context, attachment reconcile.AttachmentState) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if attachment.ProgramID == 0 {
+		return fmt.Errorf("owned attachment program ID is required")
+	}
+	spec, err := datapath.NewFixedFilter(attachment.Link, attachment.Program, attachment.ProgramID, true)
+	if err != nil {
+		return err
+	}
+	if attachment.Hook != string(spec.Hook) || attachment.Priority != spec.Priority || attachment.Handle != spec.Handle {
+		return reconcile.NewClassifiedError(reconcile.ErrorSafetyViolation, "TC_OWNERSHIP_IDENTITY_INVALID", 0, fmt.Errorf("owned attachment identity does not match program %s", attachment.Program))
+	}
+	if err := r.tc.RemoveFilter(ctx, spec); err != nil {
+		return fmt.Errorf("remove owned attachment %s/%d: %w", attachment.Program, attachment.Handle, err)
+	}
+	return nil
+}
+
 func (r *EndpointRemover) Remove(ctx context.Context, owned reconcile.OwnedEndpoint, actual reconcile.ActualState, desired reconcile.DesiredState) error {
 	if err := ctx.Err(); err != nil {
 		return err

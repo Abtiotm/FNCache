@@ -43,6 +43,13 @@ func TestLoadRejectsHeartbeatConstraint(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsUnsupportedLogLevel(t *testing.T) {
+	t.Setenv("ONCACHE_LOG_LEVEL", "trace")
+	if _, err := Load(""); err == nil {
+		t.Fatal("unsupported log level was accepted")
+	}
+}
+
 func TestLoadRejectsMissingDynamicDatapathIdentity(t *testing.T) {
 	path := writeConfig(t, "nodeName: node-a\ndatapath:\n  elfPath: /opt/oncache/bpf/tc_prog_kern.o\n  elfBuildID: \"\"\n")
 	if _, err := Load(path); err == nil {

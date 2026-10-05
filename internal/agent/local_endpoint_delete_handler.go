@@ -28,11 +28,9 @@ type LocalEndpointDeleteHandlerConfig struct {
 	Ownership  localOwnershipSource
 	LocalNode  string
 	Desired    localDesiredSource
-	Scanner    localStateScanner
-	Control    localControl
 	Remover    localEndpointRemover
 	ReuseGuard localEndpointReuseGuard
-	Publisher  localPublisher
+	Generation localGenerationTransaction
 }
 
 type LocalEndpointDeleteHandler struct {
@@ -40,7 +38,7 @@ type LocalEndpointDeleteHandler struct {
 }
 
 func NewLocalEndpointDeleteHandler(config LocalEndpointDeleteHandlerConfig) (*LocalEndpointDeleteHandler, error) {
-	if config.Store == nil || config.Ownership == nil || config.LocalNode == "" || config.Desired == nil || config.Scanner == nil || config.Control == nil || config.Remover == nil || config.ReuseGuard == nil || config.Publisher == nil {
+	if config.Store == nil || config.Ownership == nil || config.LocalNode == "" || config.Desired == nil || config.Remover == nil || config.ReuseGuard == nil || config.Generation == nil {
 		return nil, fmt.Errorf("local endpoint delete handler dependencies are required")
 	}
 	return &LocalEndpointDeleteHandler{config: config}, nil
@@ -71,17 +69,6 @@ func (h *LocalEndpointDeleteHandler) Handle(ctx context.Context, key reconcile.R
 	if err := h.config.ReuseGuard.Check(ctx, snapshot, key.UID, owned); err != nil && !isKnownEndpointReuse(err) {
 		return err
 	}
-	if err := h.config.Control.Disable(ctx); err != nil {
-		return fmt.Errorf("disable fast path: %w", err)
-	}
-	snapshot = h.config.Store.Snapshot()
-	if err := h.config.ReuseGuard.Check(ctx, snapshot, key.UID, owned); err != nil && !isKnownEndpointReuse(err) {
-		return err
-	}
-	actual, err := h.config.Scanner.Scan(ctx)
-	if err != nil {
-		return fmt.Errorf("scan before local endpoint removal: %w", err)
-	}
 	base, err := h.config.Desired.Desired(ctx)
 	if err != nil {
 		return fmt.Errorf("read desired state: %w", err)
@@ -96,14 +83,13 @@ func (h *LocalEndpointDeleteHandler) Handle(ctx context.Context, key reconcile.R
 	if err != nil {
 		return fmt.Errorf("build desired state after local endpoint removal: %w", err)
 	}
-	if err := h.config.Remover.Remove(ctx, owned, actual, desired); err != nil {
-		return fmt.Errorf("remove local endpoint: %w", err)
-	}
-	actual, err = h.config.Scanner.Scan(ctx)
-	if err != nil {
-		return fmt.Errorf("scan after local endpoint removal: %w", err)
-	}
-	if err := h.config.Publisher.CommitAndPublish(ctx, desired, actual); err != nil {
+	if err := h.config.Generation.Execute(ctx, desired, func(ctx context.Context, desired reconcile.DesiredState, actual reconcile.ActualState) error {
+		snapshot := h.config.Store.Snapshot()
+		if err := h.config.ReuseGuard.Check(ctx, snapshot, key.UID, owned); err != nil && !isKnownEndpointReuse(err) {
+			return err
+		}
+		return h.config.Remover.Remove(ctx, owned, actual, desired)
+	}); err != nil {
 		return fmt.Errorf("publish local endpoint removal: %w", err)
 	}
 	return nil

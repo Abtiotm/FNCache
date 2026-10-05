@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/cat-cc-Lcos/FNCache/internal/controlplane"
 	"github.com/cat-cc-Lcos/FNCache/internal/kube"
 	"github.com/cat-cc-Lcos/FNCache/internal/reconcile"
 	"github.com/cat-cc-Lcos/FNCache/internal/resolver"
@@ -35,17 +36,22 @@ type localPublisher interface {
 	CommitAndPublish(context.Context, reconcile.DesiredState, reconcile.ActualState) error
 }
 
+type localGenerationTransaction interface {
+	Execute(context.Context, reconcile.DesiredState, controlplane.GenerationMutator) error
+}
+
 type LocalEndpointHandlerConfig struct {
-	Store     *kube.SnapshotStore
-	Resolver  resolver.EndpointResolver
-	LocalNode string
-	Desired   localDesiredSource
-	Scanner   localStateScanner
-	Control   localControl
-	Endpoint  localEndpointEnsurer
-	Maps      localMapEnsurer
-	Remover   localEndpointRemover
-	Publisher localPublisher
+	Store      *kube.SnapshotStore
+	Resolver   resolver.EndpointResolver
+	LocalNode  string
+	Desired    localDesiredSource
+	Scanner    localStateScanner
+	Control    localControl
+	Endpoint   localEndpointEnsurer
+	Maps       localMapEnsurer
+	Remover    localEndpointRemover
+	Publisher  localPublisher
+	Generation localGenerationTransaction
 }
 
 type LocalEndpointHandler struct {
@@ -53,7 +59,7 @@ type LocalEndpointHandler struct {
 }
 
 func NewLocalEndpointHandler(config LocalEndpointHandlerConfig) (*LocalEndpointHandler, error) {
-	if config.Store == nil || config.Resolver == nil || config.LocalNode == "" || config.Desired == nil || config.Scanner == nil || config.Control == nil || config.Endpoint == nil || config.Maps == nil || config.Remover == nil || config.Publisher == nil {
+	if config.Store == nil || config.Resolver == nil || config.LocalNode == "" || config.Desired == nil || config.Scanner == nil || config.Control == nil || config.Endpoint == nil || config.Maps == nil || config.Remover == nil || config.Publisher == nil || config.Generation == nil {
 		return nil, fmt.Errorf("local endpoint handler dependencies are required")
 	}
 	return &LocalEndpointHandler{config: config}, nil
@@ -94,33 +100,25 @@ func (h *LocalEndpointHandler) Handle(ctx context.Context, key reconcile.Reconci
 	if err != nil {
 		return fmt.Errorf("build local desired state: %w", err)
 	}
-	if err := h.config.Control.Disable(ctx); err != nil {
-		return fmt.Errorf("disable fast path: %w", err)
-	}
-	actual, err := h.config.Scanner.Scan(ctx)
-	if err != nil {
-		return fmt.Errorf("scan before local endpoint ensure: %w", err)
-	}
-	if previous, ok := base.LocalEndpoints[pod.Identity.UID]; ok && endpointIdentityChanged(previous, endpoint) {
-		if err := h.config.Remover.Remove(ctx, ownedEndpointFromResolver(previous), actual, desired); err != nil {
-			return fmt.Errorf("remove previous local endpoint identity: %w", err)
+	if err := h.config.Generation.Execute(ctx, desired, func(ctx context.Context, desired reconcile.DesiredState, actual reconcile.ActualState) error {
+		if previous, ok := base.LocalEndpoints[pod.Identity.UID]; ok && endpointIdentityChanged(previous, endpoint) {
+			if err := h.config.Remover.Remove(ctx, ownedEndpointFromResolver(previous), actual, desired); err != nil {
+				return fmt.Errorf("remove previous local endpoint identity: %w", err)
+			}
+			var err error
+			actual, err = h.config.Scanner.Scan(ctx)
+			if err != nil {
+				return fmt.Errorf("scan after previous endpoint removal: %w", err)
+			}
 		}
-		actual, err = h.config.Scanner.Scan(ctx)
-		if err != nil {
-			return fmt.Errorf("scan after previous endpoint removal: %w", err)
+		if _, err := h.config.Endpoint.EnsureEndpoint(ctx, desired, actual, endpoint); err != nil {
+			return fmt.Errorf("ensure local endpoint: %w", err)
 		}
-	}
-	if _, err := h.config.Endpoint.EnsureEndpoint(ctx, desired, actual, endpoint); err != nil {
-		return fmt.Errorf("ensure local endpoint: %w", err)
-	}
-	if _, err := h.config.Maps.EnsureEndpointMaps(ctx, desired, actual, endpoint, true); err != nil {
-		return fmt.Errorf("ensure local endpoint Maps: %w", err)
-	}
-	actual, err = h.config.Scanner.Scan(ctx)
-	if err != nil {
-		return fmt.Errorf("scan after local endpoint ensure: %w", err)
-	}
-	if err := h.config.Publisher.CommitAndPublish(ctx, desired, actual); err != nil {
+		if _, err := h.config.Maps.EnsureEndpointMaps(ctx, desired, actual, endpoint, true); err != nil {
+			return fmt.Errorf("ensure local endpoint Maps: %w", err)
+		}
+		return nil
+	}); err != nil {
 		return fmt.Errorf("publish local endpoint: %w", err)
 	}
 	return nil

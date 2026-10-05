@@ -197,13 +197,6 @@ static __always_inline void initegressinfo(struct oncache_egress_v1* ci, const v
     ci->ifindex = ifindex;
 }
 
-unsigned long long load_byte(void *skb,
-        unsigned long long off) asm("llvm.bpf.load.byte");
-unsigned long long load_half(void *skb,
-        unsigned long long off) asm("llvm.bpf.load.half");
-unsigned long long load_word(void *skb,
-        unsigned long long off) asm("llvm.bpf.load.word");
-
 #define IP_CSUM_OFF (ETH_HLEN + offsetof(struct iphdr, check))
 #define IP_DST_OFF (ETH_HLEN + offsetof(struct iphdr, daddr))
 #define IP_SRC_OFF (ETH_HLEN + offsetof(struct iphdr, saddr))
@@ -221,7 +214,10 @@ unsigned long long load_word(void *skb,
 
 static inline int set_ip_tos(struct __sk_buff *skb, unsigned int off, __u8 tos)
 {
-    __u8 old_tos = load_byte(skb, off + IP_TOS_OFF);
+    __u8 old_tos;
+    if (bpf_skb_load_bytes(skb, off + IP_TOS_OFF, &old_tos, sizeof(old_tos)) < 0) {
+        return -1;
+    }
     __u8 new_tos;
     __u8 set_mask = tos & ONCACHE_TOS_MASK;
     if (set_mask){
@@ -234,11 +230,12 @@ static inline int set_ip_tos(struct __sk_buff *skb, unsigned int off, __u8 tos)
 }
 
 static inline void set_new_ip(
-    struct __sk_buff *skb, unsigned int off,  __be32 new_ip, int is_src, unsigned char proto, bool do_l4csum) {
+        struct __sk_buff *skb, unsigned int off,  __be32 new_ip, int is_src, unsigned char proto, bool do_l4csum) {
     unsigned int field;
     if (is_src == IS_SRC) field = off + IP_SRC_OFF;
     else field = off + IP_DST_OFF;
-    __be32 old_ip = bpf_htonl(load_word(skb, field));
+    __be32 old_ip;
+    if (bpf_skb_load_bytes(skb, field, &old_ip, sizeof(old_ip)) < 0) return;
 
     if (do_l4csum) {
         if (proto == IPPROTO_TCP) {
@@ -252,7 +249,8 @@ static inline void set_new_ip(
 }
 
 static inline void set_new_ipid(struct __sk_buff *skb, unsigned int off,  __be16 new_id) {
-    __be16 old_id = bpf_htons(load_half(skb, off + IP_ID_OFF));
+    __be16 old_id;
+    if (bpf_skb_load_bytes(skb, off + IP_ID_OFF, &old_id, sizeof(old_id)) < 0) return;
     bpf_l3_csum_replace(skb, off + IP_CSUM_OFF, old_id, new_id, sizeof(new_id));
     bpf_skb_store_bytes(skb, off + IP_ID_OFF, &new_id, sizeof(new_id), 0);
 }
@@ -269,7 +267,8 @@ static inline int set_new_length_outerhdr(struct __sk_buff *skb, unsigned int or
     }
 
     if ((void *)(long)skb->data_end < (void *)(long)skb->data + MACLEN + IPLEN) return -1;
-    __u16 old_len = bpf_htons(load_half(skb, IP_LEN_OFF));
+    __be16 old_len;
+    if (bpf_skb_load_bytes(skb, IP_LEN_OFF, &old_len, sizeof(old_len)) < 0) return -1;
     __u16 ip_len = bpf_htons(ori_len - MACLEN);
     if (bpf_l3_csum_replace(skb, IP_CSUM_OFF, old_len, ip_len, sizeof(ip_len)) < 0) {
         return -1;

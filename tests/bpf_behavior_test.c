@@ -359,6 +359,19 @@ static int ready_race(const char *path) {
     return failed;
 }
 
+static int fallback_icmp_tests(const char *path) {
+    struct env e;
+    uint8_t packet[PACKET_MAX], output[PACKET_MAX];
+    size_t len = plain_packet(packet, 0, IPPROTO_ICMP, IP_A, IP_B);
+    if (load_env(path, &e) || control(&e, 1, 0, 0, UINT64_MAX)) return 1;
+    int ret = run(program(&e, "tc_masq"), packet, len, IF_IN, output);
+    int failed = check(ret == TC_ACT_OK, "ICMP fallback return") ||
+                 check(output[15] == 0, "ICMP fallback preserves TOS") ||
+                 check(!memcmp(packet, output, len), "ICMP fallback preserves packet");
+    close_env(&e);
+    return failed;
+}
+
 static int fault_tests(const char *path, const char *kind) {
     struct env e;
     uint8_t packet[PACKET_MAX], output[PACKET_MAX];
@@ -382,6 +395,8 @@ int main(int argc, char **argv) {
     if (malformed_tests(argv[1])) return 1;
     puts("learn-hit");
     if (learn_hit_tests(argv[1])) return 1;
+    puts("icmp-fallback");
+    if (fallback_icmp_tests(argv[1])) return 1;
     puts("ready-race");
     if (ready_race(argv[1])) return 1;
     puts("helper-faults");

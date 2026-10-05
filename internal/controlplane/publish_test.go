@@ -14,12 +14,16 @@ import (
 )
 
 type fakeOwnershipCommitter struct {
-	events *[]string
-	state  reconcile.OwnershipState
-	err    error
+	events  *[]string
+	state   reconcile.OwnershipState
+	loadErr error
+	err     error
 }
 
 func (f *fakeOwnershipCommitter) Load(context.Context) (reconcile.OwnershipState, error) {
+	if f.loadErr != nil {
+		return reconcile.OwnershipState{}, f.loadErr
+	}
 	return f.state, nil
 }
 

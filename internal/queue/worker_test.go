@@ -1,12 +1,15 @@
 package queue
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/cat-cc-Lcos/FNCache/internal/logging"
 	"github.com/cat-cc-Lcos/FNCache/internal/reconcile"
 )
 
@@ -96,4 +99,38 @@ func TestWorkerUsesExecutionBarrier(t *testing.T) {
 		t.Fatal("barrier worker did not process item")
 	}
 	q.ShutDown()
+}
+
+func TestWorkerLogsClassifiedFailures(t *testing.T) {
+	q, _ := New(Config{BaseDelay: time.Millisecond, MaxDelay: 10 * time.Millisecond})
+	var output bytes.Buffer
+	logger, err := logging.New(logging.Config{Level: "debug", Component: "queue", Writer: &output, RateInterval: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := NewWorkerWithBarrierAndLogger(q, func(context.Context, reconcile.ReconcileKey) error {
+		return reconcile.NewClassifiedError(reconcile.ErrorUnsupported, "CAPABILITY_UNSUPPORTED", 0, errors.New("unsupported"))
+	}, nil, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { worker.Run(ctx); close(done) }()
+	q.Add(workerKey())
+	time.Sleep(20 * time.Millisecond)
+	q.ShutDown()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("worker did not stop")
+	}
+	var record map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(output.Bytes()), &record); err != nil {
+		t.Fatalf("invalid worker log: %v output=%s", err, output.String())
+	}
+	if record["reason"] != "CAPABILITY_UNSUPPORTED" || record["class"] != "Unsupported" {
+		t.Fatalf("unexpected worker log: %#v", record)
+	}
 }

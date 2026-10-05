@@ -1,0 +1,10 @@
+M4_SHUTDOWN_IMAGE ?= oncache-agent:m4-shutdown
+
+.PHONY: build-m4-shutdown-image test-m4-shutdown
+
+build-m4-shutdown-image:
+	$(MAKE) build-m3-e2e-image M3_E2E_IMAGE="$(M4_SHUTDOWN_IMAGE)"
+
+test-m4-shutdown:
+	test -n "$(M4_SHUTDOWN_IMAGE)"
+	ONCACHE_M4_SHUTDOWN_E2E=1 ONCACHE_M3_E2E_IMAGE="$(M4_SHUTDOWN_IMAGE)" $(GO) test -tags=m3e2e -count=1 -run '^TestM4ShutdownE2E$$' ./e2e

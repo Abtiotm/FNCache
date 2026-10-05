@@ -4,13 +4,16 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
 
 	"github.com/cat-cc-Lcos/FNCache/internal/resolver"
@@ -39,6 +42,9 @@ func TestInformerSourceSyncAndLifecycle(t *testing.T) {
 	if err := source.WaitForSync(syncCtx); err != nil {
 		t.Fatal(err)
 	}
+	if !source.Health().Synced {
+		t.Fatal("successful informer sync was not recorded")
+	}
 	snapshot := store.Snapshot()
 	if len(snapshot.Pods) != 1 || len(snapshot.Nodes) != 1 {
 		t.Fatalf("initial snapshot = %#v", snapshot)
@@ -66,6 +72,54 @@ func TestInformerSourceSyncAndLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFor(t, func() bool { return len(store.Snapshot().Nodes) == 0 })
+}
+
+func TestInformerSourceProbeAPIAndFreshness(t *testing.T) {
+	client := fake.NewSimpleClientset(informerNode())
+	source, err := NewInformerSource(client, NewSnapshotStore(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go source.Run(ctx)
+	if err := source.WaitForSync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.ProbeAPI(ctx); err != nil {
+		t.Fatal(err)
+	}
+	health := source.Health()
+	if !health.FreshAt(health.LastProbeAt, time.Second) {
+		t.Fatalf("successful API probe was not fresh: %+v", health)
+	}
+	if health.FreshAt(health.LastProbeAt.Add(2*time.Second), time.Second) {
+		t.Fatalf("stale API probe was reported fresh: %+v", health)
+	}
+}
+
+func TestInformerSourceProbeAPIRecordsFailure(t *testing.T) {
+	client := fake.NewSimpleClientset(informerNode())
+	source, err := NewInformerSource(client, NewSnapshotStore(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go source.Run(ctx)
+	if err := source.WaitForSync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	client.PrependReactor("list", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("API unavailable")
+	})
+	if err := source.ProbeAPI(ctx); err == nil || !strings.Contains(err.Error(), "probe Pod API") {
+		t.Fatalf("unexpected API probe error: %v", err)
+	}
+	health := source.Health()
+	if health.LastProbeErr == nil || !health.FreshAt(time.Now(), time.Minute) {
+		t.Fatalf("recent failed API probe was not retained as fresh: %+v", health)
+	}
 }
 
 func TestInformerSourceWaitForSyncHonorsCancellation(t *testing.T) {

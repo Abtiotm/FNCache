@@ -50,8 +50,8 @@ func (t dynamicObserverTC) Scan(_ context.Context, links []resolver.LinkIdentity
 
 type dynamicObserverRules struct{}
 
-func (dynamicObserverRules) Scan(context.Context, flannel.MarkerRuleSpec) (reconcile.RuleState, error) {
-	return reconcile.RuleState{Present: true}, nil
+func (dynamicObserverRules) Scan(_ context.Context, spec flannel.MarkerRuleSpec) (reconcile.RuleState, error) {
+	return reconcile.RuleState{Present: true, Identity: spec.Chain + "/" + spec.Comment, Fingerprint: flannel.ExpectedMarkerFingerprint(spec)}, nil
 }
 
 func TestDynamicObserverBuildsLatestDesiredAndActualState(t *testing.T) {

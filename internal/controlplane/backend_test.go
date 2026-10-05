@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"os"
 	"testing"
 
 	"github.com/cat-cc-Lcos/FNCache/internal/reconcile"
@@ -167,6 +168,67 @@ func TestFirstPassBackendStopsBeforeOwnershipOnEnsureFailure(t *testing.T) {
 	}
 	if len(*store.events) != 0 {
 		t.Fatalf("ownership was changed after ensure failure: %v", *store.events)
+	}
+}
+
+func TestFirstPassBackendStopsBeforeMutationWhenOwnershipIsUnsafe(t *testing.T) {
+	desired := publishTestDesired()
+	for _, loadErr := range []error{errors.New("corrupt ownership state"), errors.New("ownership state unreadable")} {
+		t.Run(loadErr.Error(), func(t *testing.T) {
+			store := &fakeOwnershipCommitter{events: new([]string), loadErr: loadErr}
+			publisher, err := NewPublisher(store, &fakeControlPublisher{events: store.events}, publishTestConfig())
+			if err != nil {
+				t.Fatal(err)
+			}
+			collection := &backendCollection{}
+			marker := &backendMarker{}
+			remover := &backendRemover{}
+			backend, err := NewFirstPassBackend(FirstPassBackendConfig{
+				Observer: &backendObserver{desired: desired, actual: publishTestActual(desired)}, Control: &backendControl{},
+				Collection: collection, Marker: marker, Base: &backendEnsurer{}, Endpoint: &backendEnsurer{}, Maps: &backendEnsurer{},
+				Ownership: store, Remover: remover, Publisher: publisher,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			coordinator, err := reconcile.NewCoordinator(backend)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := coordinator.FullReconcile(context.Background())
+			if err == nil || result.State != reconcile.AgentDisabled {
+				t.Fatalf("unsafe ownership state was not rejected: result=%+v err=%v", result, err)
+			}
+			if collection.calls != 0 || marker.calls != 0 || remover.calls != 0 || len(*store.events) != 0 {
+				t.Fatalf("unsafe ownership state allowed mutation: collection=%d marker=%d remover=%d events=%v", collection.calls, marker.calls, remover.calls, *store.events)
+			}
+		})
+	}
+}
+
+func TestFirstPassBackendRebuildsWithoutMissingOwnershipState(t *testing.T) {
+	desired := publishTestDesired()
+	store := &fakeOwnershipCommitter{events: new([]string), loadErr: os.ErrNotExist}
+	publisher, err := NewPublisher(store, &fakeControlPublisher{events: store.events}, publishTestConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	collection := &backendCollection{}
+	backend, err := NewFirstPassBackend(FirstPassBackendConfig{
+		Observer: &backendObserver{desired: desired, actual: publishTestActual(desired)}, Control: &backendControl{},
+		Collection: collection, Marker: &backendMarker{}, Base: &backendEnsurer{}, Endpoint: &backendEnsurer{}, Maps: &backendEnsurer{},
+		Ownership: store, Remover: &backendRemover{}, Publisher: publisher,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator, err := reconcile.NewCoordinator(backend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := coordinator.FullReconcile(context.Background())
+	if err != nil || result.State != reconcile.AgentReady || collection.calls != 1 {
+		t.Fatalf("missing ownership state did not rebuild safely: result=%+v err=%v collection=%d", result, err, collection.calls)
 	}
 }
 

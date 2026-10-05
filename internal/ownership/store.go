@@ -3,6 +3,7 @@ package ownership
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,13 @@ import (
 )
 
 const schemaVersion uint32 = 1
+
+var (
+	ErrStateMissing    = errors.New("ownership state is missing")
+	ErrStateUnreadable = errors.New("ownership state is unreadable")
+	ErrStateInvalid    = errors.New("ownership state is invalid")
+	ErrStateCommit     = errors.New("ownership state commit failed")
+)
 
 type OwnershipStore interface {
 	Load(context.Context) (reconcile.OwnershipState, error)
@@ -33,14 +41,17 @@ func (s *Store) Load(ctx context.Context) (reconcile.OwnershipState, error) {
 	}
 	data, err := os.ReadFile(s.path)
 	if err != nil {
-		return reconcile.OwnershipState{}, err
+		if errors.Is(err, os.ErrNotExist) {
+			return reconcile.OwnershipState{}, fmt.Errorf("%w: %w", ErrStateMissing, err)
+		}
+		return reconcile.OwnershipState{}, fmt.Errorf("%w: %v", ErrStateUnreadable, err)
 	}
 	var state reconcile.OwnershipState
 	if err := json.Unmarshal(data, &state); err != nil {
-		return reconcile.OwnershipState{}, fmt.Errorf("decode ownership state: %w", err)
+		return reconcile.OwnershipState{}, fmt.Errorf("%w: decode ownership state: %v", ErrStateInvalid, err)
 	}
 	if err := validateState(state); err != nil {
-		return reconcile.OwnershipState{}, err
+		return reconcile.OwnershipState{}, fmt.Errorf("%w: %v", ErrStateInvalid, err)
 	}
 	return state, nil
 }
@@ -54,7 +65,7 @@ func (s *Store) Commit(ctx context.Context, state reconcile.OwnershipState) erro
 	}
 	dir := filepath.Dir(s.path)
 	if err := os.MkdirAll(dir, 0750); err != nil {
-		return fmt.Errorf("create ownership state directory: %w", err)
+		return fmt.Errorf("%w: create ownership state directory: %v", ErrStateCommit, err)
 	}
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
@@ -63,32 +74,35 @@ func (s *Store) Commit(ctx context.Context, state reconcile.OwnershipState) erro
 	data = append(data, '\n')
 	tmp, err := os.CreateTemp(dir, ".state-*.tmp")
 	if err != nil {
-		return fmt.Errorf("create ownership state temporary file: %w", err)
+		return fmt.Errorf("%w: create ownership state temporary file: %v", ErrStateCommit, err)
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
 	if err := tmp.Chmod(0600); err != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("set ownership state permissions: %w", err)
+		return fmt.Errorf("%w: set ownership state permissions: %v", ErrStateCommit, err)
 	}
 	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("write ownership state: %w", err)
+		return fmt.Errorf("%w: write ownership state: %v", ErrStateCommit, err)
 	}
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("sync ownership state: %w", err)
+		return fmt.Errorf("%w: sync ownership state: %v", ErrStateCommit, err)
 	}
 	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close ownership state: %w", err)
+		return fmt.Errorf("%w: close ownership state: %v", ErrStateCommit, err)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if err := os.Rename(tmpName, s.path); err != nil {
-		return fmt.Errorf("replace ownership state: %w", err)
+		return fmt.Errorf("%w: replace ownership state: %v", ErrStateCommit, err)
 	}
-	return syncDirectory(dir)
+	if err := syncDirectory(dir); err != nil {
+		return fmt.Errorf("%w: %v", ErrStateCommit, err)
+	}
+	return nil
 }
 
 func (s *Store) Remove(ctx context.Context) error {

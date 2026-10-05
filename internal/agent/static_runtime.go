@@ -133,6 +133,10 @@ func (c *runtimeControl) Publish(ctx context.Context, generation, heartbeatNS, h
 	return c.writer.Publish(ctx, generation, heartbeatNS, heartbeatTimeoutNS, flags)
 }
 
+func (c *runtimeControl) RefreshHeartbeat(ctx context.Context, heartbeatNS uint64) error {
+	return c.writer.RefreshHeartbeat(ctx, heartbeatNS)
+}
+
 func validateStaticRuntimeConfig(config StaticRuntimeConfig) error {
 	if config.ELFPath == "" || !filepath.IsAbs(config.ELFPath) {
 		return fmt.Errorf("ELFPath must be an absolute file path")

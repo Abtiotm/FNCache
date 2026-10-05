@@ -2,8 +2,10 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"k8s.io/client-go/kubernetes"
@@ -19,33 +21,27 @@ import (
 )
 
 type DynamicRuntime struct {
-	config      config.AgentConfiguration
-	store       *kube.SnapshotStore
-	source      *kube.InformerSource
-	bootstrap   *KubeBootstrap
-	resync      *kube.ResyncScheduler
-	queue       *queue.Queue
-	barrier     *reconcile.CoordinationBarrier
-	factory     datapathComponentFactory
-	components  *datapathComponents
-	observer    *DynamicObserver
-	coordinator *reconcile.Coordinator
-	worker      *queue.Worker
+	config        config.AgentConfiguration
+	store         *kube.SnapshotStore
+	source        *kube.InformerSource
+	bootstrap     *KubeBootstrap
+	resync        *kube.ResyncScheduler
+	queue         *queue.Queue
+	barrier       *reconcile.CoordinationBarrier
+	lifecycle     *reconcile.AgentStateMachine
+	healthEpoch   *HealthEpoch
+	factory       datapathComponentFactory
+	components    *datapathComponents
+	observer      *DynamicObserver
+	worker        *queue.Worker
+	heartbeat     *HeartbeatRefresher
+	apiHealth     *APIHealthMonitor
+	flannelHealth *FlannelHealthMonitor
+	markerHealth  *MarkerHealthMonitor
+	scanScheduler *ScanScheduler
 }
 
 type datapathComponentFactory func(context.Context, datapathComponentConfig) (*datapathComponents, error)
-
-type dynamicObservationBackend struct {
-	observer *DynamicObserver
-}
-
-func (b dynamicObservationBackend) Discover(ctx context.Context) (reconcile.DesiredState, error) {
-	return b.observer.Desired(ctx)
-}
-
-func (b dynamicObservationBackend) Scan(ctx context.Context) (reconcile.ActualState, error) {
-	return b.observer.Scan(ctx)
-}
 
 func NewDynamicRuntime(configPath string) (*DynamicRuntime, error) {
 	cfg, err := config.Load(configPath)
@@ -99,36 +95,241 @@ func newDynamicRuntimeWithFactory(cfg config.AgentConfiguration, client kubernet
 	if err != nil {
 		return nil, err
 	}
-	return &DynamicRuntime{config: cfg, store: store, source: source, bootstrap: bootstrap, resync: resync, queue: target, barrier: reconcile.NewCoordinationBarrier(), factory: factory}, nil
+	apiHealth, err := NewAPIHealthMonitor(APIHealthMonitorConfig{Source: source, Interval: time.Duration(cfg.Health.Interval), MaxStaleness: time.Duration(cfg.Kube.MaxStaleness)})
+	if err != nil {
+		return nil, err
+	}
+	return &DynamicRuntime{config: cfg, store: store, source: source, bootstrap: bootstrap, resync: resync, queue: target, barrier: reconcile.NewCoordinationBarrier(), lifecycle: reconcile.NewAgentStateMachine(), healthEpoch: NewHealthEpoch(), factory: factory, apiHealth: apiHealth}, nil
 }
 
 func (r *DynamicRuntime) Run(ctx context.Context) error {
 	if err := r.bootstrap.Start(ctx); err != nil {
+		if transitionErr := r.lifecycle.Transition(reconcile.AgentDisabled); transitionErr != nil {
+			return errors.Join(err, transitionErr)
+		}
+		return err
+	}
+	if err := r.lifecycle.Transition(reconcile.AgentReconciling); err != nil {
 		return err
 	}
 	if err := r.initializeDatapath(ctx); err != nil {
+		if transitionErr := r.lifecycle.Transition(reconcile.AgentDisabled); transitionErr != nil {
+			return errors.Join(err, transitionErr)
+		}
 		return err
 	}
-	if _, err := r.coordinator.FullReconcile(ctx); err != nil {
+	if err := r.reconcileInitial(ctx); err != nil {
+		if transitionErr := r.lifecycle.Transition(reconcile.AgentDisabled); transitionErr != nil {
+			_ = r.components.Close()
+			return errors.Join(err, transitionErr)
+		}
 		_ = r.components.Close()
-		return fmt.Errorf("initial dynamic full reconcile: %w", err)
+		return err
 	}
-	go r.resync.Run(ctx)
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go r.resync.Run(runCtx)
 	workerDone := make(chan struct{})
 	go func() {
-		r.worker.Run(ctx)
+		r.worker.Run(runCtx)
 		close(workerDone)
 	}()
-	<-ctx.Done()
+	if err := r.lifecycle.Transition(reconcile.AgentReady); err != nil {
+		cancel()
+		r.queue.ShutDown()
+		<-workerDone
+		_ = r.components.Close()
+		return err
+	}
+	r.healthEpoch.Advance()
+	heartbeatDone := make(chan error, 1)
+	go func() { heartbeatDone <- r.heartbeat.Run(runCtx) }()
+	heartbeatObserved := false
+	scanResults := r.scanScheduler.Run(runCtx)
+	_ = r.scanScheduler.Trigger(ScanFull)
+	var failureErr error
+	var runErr, stopErr error
+	stoppingRequested := false
+	stopped := false
+	for !stopped {
+		select {
+		case heartbeatErr := <-heartbeatDone:
+			heartbeatObserved = true
+			if ctx.Err() != nil {
+				r.healthEpoch.Invalidate()
+				stoppingRequested = true
+				stopErr = r.lifecycle.Transition(reconcile.AgentStopping)
+			} else {
+				r.healthEpoch.Invalidate()
+				if heartbeatErr == nil {
+					heartbeatErr = fmt.Errorf("heartbeat refresher stopped unexpectedly")
+				}
+				failureErr = heartbeatErr
+			}
+			cancel()
+			r.queue.ShutDown()
+			stopped = true
+		case result, ok := <-scanResults:
+			if !ok {
+				if ctx.Err() != nil {
+					r.healthEpoch.Invalidate()
+					stopErr = r.lifecycle.Transition(reconcile.AgentStopping)
+				} else {
+					r.healthEpoch.Invalidate()
+					failureErr = fmt.Errorf("scan scheduler stopped unexpectedly")
+				}
+				cancel()
+				r.queue.ShutDown()
+				stopped = true
+				continue
+			}
+			if result.Critical || result.InvalidateEpoch {
+				r.healthEpoch.Invalidate()
+				failureErr = result.Err
+				if failureErr == nil {
+					failureErr = fmt.Errorf("%s", result.Reason)
+				}
+				cancel()
+				r.queue.ShutDown()
+				stopped = true
+			}
+		case <-ctx.Done():
+			r.healthEpoch.Invalidate()
+			stoppingRequested = true
+			stopErr = r.lifecycle.Transition(reconcile.AgentStopping)
+			cancel()
+			r.queue.ShutDown()
+			stopped = true
+		}
+	}
+	shutdownTimeout := time.Duration(r.config.Heartbeat.Timeout) + time.Second
+	shutdownWaiter, waiterErr := NewShutdownWaiter(shutdownTimeout)
+	if waiterErr != nil {
+		return errors.Join(runErr, stopErr, waiterErr)
+	}
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer shutdownCancel()
+	var shutdownErr error
+	if !heartbeatObserved {
+		shutdownErr = errors.Join(shutdownErr, shutdownWaiter.WaitError(shutdownCtx, heartbeatDone))
+	}
+	shutdownErr = errors.Join(shutdownErr, shutdownWaiter.Drain(shutdownCtx, scanResults))
 	r.queue.ShutDown()
-	<-workerDone
+	shutdownErr = errors.Join(shutdownErr, shutdownWaiter.Wait(shutdownCtx, workerDone))
+	if stoppingRequested && shutdownErr == nil {
+		shutdownErr = errors.Join(shutdownErr, r.disableFastPathForShutdown())
+	}
+	if failureErr != nil && shutdownErr == nil {
+		disableCtx, disableCancel := context.WithTimeout(context.Background(), time.Duration(r.config.Heartbeat.Timeout))
+		disableErr := r.components.control.Disable(disableCtx)
+		disableCancel()
+		degradedErr := r.lifecycle.Transition(reconcile.AgentDegraded)
+		runErr = errors.Join(failureErr, disableErr, degradedErr)
+	}
+	var closeErr error
+	if r.components != nil && shutdownErr == nil {
+		closeErr = shutdownWaiter.Close(shutdownCtx, r.components.Close)
+	}
 	if r.components != nil {
-		return r.components.Close()
+		return errors.Join(runErr, stopErr, shutdownErr, closeErr)
+	}
+	return errors.Join(runErr, stopErr, shutdownErr)
+}
+
+func (r *DynamicRuntime) disableFastPathForShutdown() error {
+	if r.components == nil || r.components.control == nil {
+		return nil
+	}
+	timeout := time.Duration(r.config.Heartbeat.Timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if err := r.components.control.Disable(ctx); err != nil {
+		return fmt.Errorf("disable fast path during shutdown: %w", err)
 	}
 	return nil
 }
 
+func (r *DynamicRuntime) reconcileInitial(ctx context.Context) error {
+	if err := r.components.control.Disable(ctx); err != nil {
+		return fmt.Errorf("disable before initial discovery: %w", err)
+	}
+	desired, err := r.observer.Discover(ctx)
+	if err != nil {
+		return fmt.Errorf("initial discovery: %w", err)
+	}
+	if !desired.Enabled {
+		return fmt.Errorf("initial discovery disabled: %s", formatCapabilityReasons(desired.Capability.Reasons))
+	}
+	remover, err := controlplane.NewEndpointRemover(r.components.mapWriter, r.components.tc)
+	if err != nil {
+		return fmt.Errorf("create initial endpoint remover: %w", err)
+	}
+	backend, err := controlplane.NewFirstPassBackend(controlplane.FirstPassBackendConfig{
+		Observer: initialObservationBackend{observer: r.observer, desired: desired}, Control: r.components.control, Collection: r.components.collection,
+		Marker: r.components.marker, Base: r.components.base, Endpoint: r.components.endpoint,
+		Maps: r.components.maps, Ownership: r.components.ownership, Remover: remover,
+		Publisher: r.components.publisher,
+	})
+	if err != nil {
+		return fmt.Errorf("create initial reconciliation backend: %w", err)
+	}
+	coordinator, err := reconcile.NewCoordinator(backend)
+	if err != nil {
+		return fmt.Errorf("create initial reconciliation coordinator: %w", err)
+	}
+	result, err := coordinator.FullReconcile(ctx)
+	if err != nil {
+		return fmt.Errorf("initial full reconciliation: %w", err)
+	}
+	if result.State != reconcile.AgentReady {
+		return fmt.Errorf("initial full reconciliation ended in %s", result.State)
+	}
+	return nil
+}
+
+type initialObservationBackend struct {
+	observer *DynamicObserver
+	desired  reconcile.DesiredState
+}
+
+func (o initialObservationBackend) Discover(context.Context) (reconcile.DesiredState, error) {
+	return o.desired, nil
+}
+
+func (o initialObservationBackend) Scan(ctx context.Context) (reconcile.ActualState, error) {
+	return o.observer.Scan(ctx)
+}
+
+func formatCapabilityReasons(reasons []discovery.Reason) string {
+	if len(reasons) == 0 {
+		return "no capability reason reported"
+	}
+	parts := make([]string, 0, len(reasons))
+	for _, reason := range reasons {
+		if reason.Code == "" {
+			parts = append(parts, reason.Message)
+			continue
+		}
+		if reason.Message == "" {
+			parts = append(parts, reason.Code)
+			continue
+		}
+		parts = append(parts, reason.Code+": "+reason.Message)
+	}
+	return strings.Join(parts, "; ")
+}
+
 func (r *DynamicRuntime) State() KubeBootstrapState { return r.bootstrap.State() }
+
+func (r *DynamicRuntime) AgentState() reconcile.AgentState { return r.lifecycle.State() }
+
+func (r *DynamicRuntime) flannelDiscoveryRequest() flannel.DiscoveryRequest {
+	return flannel.DiscoveryRequest{VXLANLinkName: r.config.Overlay.VXLANLinkName, UnderlayDevice: r.config.Overlay.Device, MissMask: r.config.Markers.MissMask, EstablishedMask: r.config.Markers.EstablishedMask, IPTablesBackend: "iptables-nft"}
+}
+
+func (r *DynamicRuntime) markerRuleSpec() flannel.MarkerRuleSpec {
+	return flannel.MarkerRuleSpec{Chain: r.config.Markers.Chain, Comment: r.config.Markers.Comment}
+}
 
 func (r *DynamicRuntime) initializeDatapath(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
@@ -151,13 +352,65 @@ func (r *DynamicRuntime) initializeDatapath(ctx context.Context) error {
 		InstallationID: r.config.InstallationID, ELFBuildID: r.config.Datapath.ELFBuildID, HeartbeatNS: heartbeat,
 		HeartbeatTimeoutNS: uint64(time.Duration(r.config.Heartbeat.Timeout)), Flags: 0,
 		Preflight: discovery.PreflightRequest{Node: node.Identity, PinRoot: r.config.PinRoot, StateDir: r.config.StateDir, RuntimeURI: r.config.RuntimeEndpoint, Overlay: r.config.Overlay.Type},
-		Flannel:   flannel.DiscoveryRequest{VXLANLinkName: r.config.Overlay.VXLANLinkName, UnderlayDevice: r.config.Overlay.Device, MissMask: r.config.Markers.MissMask, EstablishedMask: r.config.Markers.EstablishedMask, IPTablesBackend: "iptables-nft"},
-		Marker:    flannel.MarkerRuleSpec{Chain: r.config.Markers.Chain, Comment: r.config.Markers.Comment},
+		Flannel:   r.flannelDiscoveryRequest(),
+		Marker:    r.markerRuleSpec(),
 	})
 	if err != nil {
 		return fmt.Errorf("create dynamic datapath components: %w", err)
 	}
+	heartbeatControl, ok := components.control.(HeartbeatControl)
+	if !ok {
+		_ = components.Close()
+		return fmt.Errorf("dynamic datapath heartbeat control is unavailable")
+	}
+	heartbeatRefresher, err := NewHeartbeatRefresher(HeartbeatRefresherConfig{
+		Control: heartbeatControl, Epoch: r.healthEpoch, State: r.AgentState,
+		Interval: time.Duration(r.config.Heartbeat.Interval), Now: monotonicNowNS,
+	})
+	if err != nil {
+		_ = components.Close()
+		return err
+	}
+	flannelRequest := r.flannelDiscoveryRequest()
+	flannelBaseline, err := components.sources.Flannel.Discover(ctx, flannelRequest)
+	if err != nil {
+		_ = components.Close()
+		return fmt.Errorf("discover Flannel baseline: %w", err)
+	}
+	if err := flannelBaseline.Validate(); err != nil {
+		_ = components.Close()
+		return fmt.Errorf("validate Flannel baseline: %w", err)
+	}
+	flannelHealth, err := NewFlannelHealthMonitor(FlannelHealthMonitorConfig{Source: components.sources.Flannel, Request: flannelRequest, ExpectedFingerprint: flannelBaseline.Fingerprint, Interval: time.Duration(r.config.Health.Interval)})
+	if err != nil {
+		_ = components.Close()
+		return err
+	}
+	markerSpec := r.markerRuleSpec()
+	markerHealth, err := NewMarkerHealthMonitor(MarkerHealthMonitorConfig{Source: components.sources.Rules, Pins: components.sources.Pins, Spec: markerSpec, ExpectedFingerprint: flannel.ExpectedMarkerFingerprint(markerSpec), Interval: time.Duration(r.config.Health.Interval)})
+	if err != nil {
+		_ = components.Close()
+		return err
+	}
 	observer, err := NewDynamicObserver(r.config, r.store, components.sources)
+	if err != nil {
+		_ = components.Close()
+		return err
+	}
+	scanAdapter, err := NewRuntimeScanAdapter(observer, r.apiHealth.Check, flannelHealth.Check, markerHealth.Check)
+	if err != nil {
+		_ = components.Close()
+		return err
+	}
+	scanScheduler, err := NewScanScheduler(ScanSchedulerConfig{
+		Light: scanAdapter.Light, Incremental: scanAdapter.Incremental, Full: scanAdapter.Full,
+		LightInterval: time.Duration(r.config.Health.Interval), IncrementalInterval: time.Duration(r.config.Scan.IncrementalInterval), FullInterval: time.Duration(r.config.Scan.FullInterval),
+	})
+	if err != nil {
+		_ = components.Close()
+		return err
+	}
+	generationTransaction, err := controlplane.NewGenerationTransaction(components.control, observer, components.publisher)
 	if err != nil {
 		_ = components.Close()
 		return err
@@ -167,36 +420,22 @@ func (r *DynamicRuntime) initializeDatapath(ctx context.Context) error {
 		_ = components.Close()
 		return err
 	}
-	backend, err := controlplane.NewFirstPassBackend(controlplane.FirstPassBackendConfig{
-		Observer: dynamicObservationBackend{observer: observer}, Control: components.control, Collection: components.collection, Marker: components.marker,
-		Base: components.base, Endpoint: components.endpoint, Maps: components.maps, Ownership: components.ownership,
-		Remover: remover, Publisher: components.publisher,
-	})
-	if err != nil {
-		_ = components.Close()
-		return err
-	}
-	coordinator, err := reconcile.NewCoordinator(backend)
-	if err != nil {
-		_ = components.Close()
-		return err
-	}
 	guard, err := NewEndpointReuseGuard(components.endpointResolver, r.config.NodeName)
 	if err != nil {
 		_ = components.Close()
 		return err
 	}
-	local, err := NewLocalEndpointHandler(LocalEndpointHandlerConfig{Store: r.store, Resolver: components.endpointResolver, LocalNode: r.config.NodeName, Desired: observer, Scanner: observer, Control: components.control, Endpoint: components.endpoint, Maps: components.maps, Remover: remover, Publisher: components.publisher})
+	local, err := NewLocalEndpointHandler(LocalEndpointHandlerConfig{Store: r.store, Resolver: components.endpointResolver, LocalNode: r.config.NodeName, Desired: observer, Scanner: observer, Control: components.control, Endpoint: components.endpoint, Maps: components.maps, Remover: remover, Publisher: components.publisher, Generation: generationTransaction})
 	if err != nil {
 		_ = components.Close()
 		return err
 	}
-	deleting, err := NewLocalEndpointDeleteHandler(LocalEndpointDeleteHandlerConfig{Store: r.store, Ownership: components.ownership, LocalNode: r.config.NodeName, Desired: observer, Scanner: observer, Control: components.control, Remover: remover, ReuseGuard: guard, Publisher: components.publisher})
+	deleting, err := NewLocalEndpointDeleteHandler(LocalEndpointDeleteHandlerConfig{Store: r.store, Ownership: components.ownership, LocalNode: r.config.NodeName, Desired: observer, Remover: remover, ReuseGuard: guard, Generation: generationTransaction})
 	if err != nil {
 		_ = components.Close()
 		return err
 	}
-	remote, err := NewRemoteChangeHandler(RemoteChangeHandlerConfig{Store: r.store, LocalNode: r.config.NodeName, Desired: observer, Scanner: observer, Control: components.control, Maps: components.mapWriter, Publisher: components.publisher})
+	remote, err := NewRemoteChangeHandler(RemoteChangeHandlerConfig{Store: r.store, LocalNode: r.config.NodeName, Desired: observer, Maps: components.mapWriter, Generation: generationTransaction})
 	if err != nil {
 		_ = components.Close()
 		return err
@@ -211,6 +450,6 @@ func (r *DynamicRuntime) initializeDatapath(ctx context.Context) error {
 		_ = components.Close()
 		return err
 	}
-	r.components, r.observer, r.coordinator, r.worker = components, observer, coordinator, worker
+	r.components, r.observer, r.worker, r.heartbeat, r.flannelHealth, r.markerHealth, r.scanScheduler = components, observer, worker, heartbeatRefresher, flannelHealth, markerHealth, scanScheduler
 	return nil
 }

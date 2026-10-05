@@ -305,3 +305,7 @@ func ruleFingerprint(line string) string {
 	sum := sha256.Sum256([]byte(normalized))
 	return hex.EncodeToString(sum[:])
 }
+
+func ExpectedMarkerFingerprint(spec MarkerRuleSpec) string {
+	return ruleFingerprint(markerRuleLine(spec))
+}
