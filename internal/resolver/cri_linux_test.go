@@ -5,7 +5,9 @@ package resolver
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
@@ -92,6 +94,30 @@ func TestResolveSandboxHonorsCancellation(t *testing.T) {
 	cancel()
 	if _, err := testResolver(client).ResolveSandbox(ctx, testPod()); !errors.Is(err, context.Canceled) || client.listCalls != 0 {
 		t.Fatalf("expected cancellation before CRI call: err=%v calls=%d", err, client.listCalls)
+	}
+}
+
+func TestDialContainerdCRITimesOutWhenSocketMissing(t *testing.T) {
+	endpoint := "unix://" + filepath.Join(t.TempDir(), "missing.sock")
+	_, closer, err := dialContainerdCRI(context.Background(), endpoint, 25*time.Millisecond)
+	if closer != nil {
+		_ = closer.Close()
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("dial error = %v, want context deadline exceeded", err)
+	}
+}
+
+func TestDialContainerdCRIHonorsCallerCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	endpoint := "unix://" + filepath.Join(t.TempDir(), "missing.sock")
+	_, closer, err := dialContainerdCRI(ctx, endpoint, time.Hour)
+	if closer != nil {
+		_ = closer.Close()
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("dial error = %v, want context canceled", err)
 	}
 }
 
