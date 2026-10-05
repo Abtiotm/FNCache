@@ -4,6 +4,7 @@
 </div>
 
 <p align="center">
+  <img src="https://img.shields.io/badge/Kubernetes-326CE5?logo=kubernetes&logoColor=white" alt="Kubernetes" />
   <img src="https://img.shields.io/badge/status-experimental-orange" alt="Status" />
   <img src="https://img.shields.io/badge/eBPF-datapath-blue" alt="eBPF" />
   <img src="https://img.shields.io/badge/Flannel-VXLAN-important" alt="Flannel VXLAN" />
@@ -13,7 +14,7 @@
 ---
 
 ## Introduction
-Experimental eBPF datapath for accelerating selected cross-node Pod IPv4 traffic in a Flannel VXLAN environment.
+FNCache is an experimental Kubernetes node agent that uses an eBPF datapath to accelerate selected cross-node IPv4 Pod traffic in Flannel VXLAN clusters. It learns the overlay and endpoint state required by eligible flows, then provides a fast path while preserving Flannel's normal path when the cache is cold or the datapath is not ready.
 
 ## License
 
