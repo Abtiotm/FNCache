@@ -66,7 +66,23 @@ func TestInformerSourceUpdatesSnapshotBeforeDispatch(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	var snapshotPresentDuringDispatch bool
+	source.eventMu.Lock()
+	dispatch := source.podEventHandler
+	if dispatch == nil {
+		source.eventMu.Unlock()
+		t.Fatal("Pod event handler was not attached")
+	}
+	source.podEventHandler = func(oldObj, newObj interface{}) {
+		_, snapshotPresentDuringDispatch = store.GetPod(string(pod.UID))
+		dispatch(oldObj, newObj)
+	}
+	source.eventMu.Unlock()
+
 	source.deletePod(pod)
+	if snapshotPresentDuringDispatch {
+		t.Fatal("Pod snapshot was present during dispatch")
+	}
 	if _, ok := store.GetPod(string(pod.UID)); ok {
 		t.Fatal("Pod snapshot was not removed before dispatch")
 	}
