@@ -51,10 +51,14 @@ func TestDiscoverFlannelVXLAN(t *testing.T) {
 	}
 }
 
-func TestDiscoverFlannelVXLANResolvesAutoUnderlay(t *testing.T) {
+func TestDiscoverTreatsAutoUnderlayAsAutomatic(t *testing.T) {
 	d := NewDiscovery(fixture{kind: "vxlan", vni: 1, port: 8472, route: "pod"}.run)
-	if _, err := d.Discover(context.Background(), DiscoveryRequest{UnderlayDevice: "auto"}); err != nil {
-		t.Fatalf("auto underlay was not resolved from the VXLAN link: %v", err)
+	cfg, err := d.Discover(context.Background(), DiscoveryRequest{UnderlayDevice: "auto"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.UnderlayLink.IfName != "eth0" {
+		t.Fatalf("underlay interface = %q, want eth0", cfg.UnderlayLink.IfName)
 	}
 }
 
