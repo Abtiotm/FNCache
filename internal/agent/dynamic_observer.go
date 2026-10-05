@@ -17,12 +17,13 @@ import (
 )
 
 type DynamicObserver struct {
-	config     config.AgentConfiguration
-	store      *kube.SnapshotStore
-	sources    controlplane.Sources
-	generation atomic.Uint64
-	linksMu    sync.RWMutex
-	knownLinks []resolver.LinkIdentity
+	config         config.AgentConfiguration
+	store          *kube.SnapshotStore
+	sources        controlplane.Sources
+	generation     atomic.Uint64
+	linksMu        sync.RWMutex
+	knownLinks     []resolver.LinkIdentity
+	knownEndpoints map[string]resolver.Endpoint
 }
 
 func NewDynamicObserver(cfg config.AgentConfiguration, store *kube.SnapshotStore, sources controlplane.Sources) (*DynamicObserver, error) {
@@ -32,7 +33,7 @@ func NewDynamicObserver(cfg config.AgentConfiguration, store *kube.SnapshotStore
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	return &DynamicObserver{config: cfg, store: store, sources: sources}, nil
+	return &DynamicObserver{config: cfg, store: store, sources: sources, knownEndpoints: make(map[string]resolver.Endpoint)}, nil
 }
 
 func (o *DynamicObserver) Desired(ctx context.Context) (reconcile.DesiredState, error) {
@@ -83,10 +84,7 @@ func (o *DynamicObserver) buildObserver(ctx context.Context, snapshot kube.Snaps
 		return nil, fmt.Errorf("scan local endpoints for dynamic observer: %w", err)
 	}
 	baseLinks := []resolver.LinkIdentity{flannelConfig.UnderlayLink}
-	links := resolver.MergeEndpointLinks(baseLinks, endpoints.Endpoints)
-	o.linksMu.Lock()
-	o.knownLinks = append([]resolver.LinkIdentity(nil), links...)
-	o.linksMu.Unlock()
+	links := o.rememberEndpointScan(baseLinks, localPods, endpoints)
 	observer, err := controlplane.NewObserver(o.sources, controlplane.ObservationInput{
 		Generation:       o.generation.Add(1),
 		PreflightRequest: discovery.PreflightRequest{Node: node.Identity, PinRoot: o.config.PinRoot, StateDir: o.config.StateDir, RuntimeURI: o.config.RuntimeEndpoint, Overlay: o.config.Overlay.Type},
@@ -98,6 +96,29 @@ func (o *DynamicObserver) buildObserver(ctx context.Context, snapshot kube.Snaps
 		return nil, err
 	}
 	return observer, nil
+}
+
+func (o *DynamicObserver) rememberEndpointScan(baseLinks []resolver.LinkIdentity, localPods []resolver.PodSnapshot, result resolver.EndpointScanResult) []resolver.LinkIdentity {
+	current := make(map[string]struct{}, len(localPods))
+	for _, pod := range localPods {
+		current[pod.Identity.UID] = struct{}{}
+	}
+	o.linksMu.Lock()
+	defer o.linksMu.Unlock()
+	if o.knownEndpoints == nil {
+		o.knownEndpoints = make(map[string]resolver.Endpoint)
+	}
+	for uid := range o.knownEndpoints {
+		if _, ok := current[uid]; !ok {
+			delete(o.knownEndpoints, uid)
+		}
+	}
+	for uid, endpoint := range result.Endpoints {
+		o.knownEndpoints[uid] = endpoint
+	}
+	links := resolver.MergeEndpointLinks(baseLinks, o.knownEndpoints)
+	o.knownLinks = append([]resolver.LinkIdentity(nil), links...)
+	return links
 }
 
 func (o *DynamicObserver) IncrementalScan(ctx context.Context) (reconcile.ActualState, error) {
