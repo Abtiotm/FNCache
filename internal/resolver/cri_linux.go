@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
@@ -24,6 +25,8 @@ var (
 	ErrStaleObject      = errors.New("stale endpoint object")
 	ErrUnsupported      = errors.New("unsupported runtime endpoint")
 )
+
+const criDialTimeout = 10 * time.Second
 
 type SandboxInfo struct {
 	ID         string
@@ -54,6 +57,10 @@ func newCRISandboxResolver(client CRIRuntimeClient, stat func(string) (uint64, e
 }
 
 func DialContainerdCRI(ctx context.Context, endpoint string) (*CRISandboxResolver, io.Closer, error) {
+	return dialContainerdCRI(ctx, endpoint, criDialTimeout)
+}
+
+func dialContainerdCRI(ctx context.Context, endpoint string, timeout time.Duration) (*CRISandboxResolver, io.Closer, error) {
 	path, err := unixSocketPath(endpoint)
 	if err != nil {
 		return nil, nil, err
@@ -61,7 +68,9 @@ func DialContainerdCRI(ctx context.Context, endpoint string) (*CRISandboxResolve
 	dialer := func(ctx context.Context, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, "unix", path)
 	}
-	conn, err := grpc.DialContext(ctx, "passthrough:///oncache-cri", grpc.WithContextDialer(dialer), grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+	dialCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	conn, err := grpc.DialContext(dialCtx, "passthrough:///oncache-cri", grpc.WithContextDialer(dialer), grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
 	if err != nil {
 		return nil, nil, fmt.Errorf("dial CRI endpoint: %w", err)
 	}
