@@ -36,7 +36,7 @@ type RemoteChangeHandler struct {
 }
 
 func NewRemoteChangeHandler(config RemoteChangeHandlerConfig) (*RemoteChangeHandler, error) {
-	if config.Store == nil || config.LocalNode == "" || config.Desired == nil || config.Maps == nil || config.Base == nil || config.DeviceMap == nil || config.Generation == nil {
+	if config.Store == nil || config.LocalNode == "" || config.Desired == nil || config.Maps == nil || config.Generation == nil {
 		return nil, fmt.Errorf("remote change handler dependencies are required")
 	}
 	return &RemoteChangeHandler{config: config}, nil
@@ -69,6 +69,9 @@ func (h *RemoteChangeHandler) Handle(ctx context.Context, key reconcile.Reconcil
 	}
 	if err := h.config.Generation.Execute(ctx, desired, func(ctx context.Context, desired reconcile.DesiredState, actual reconcile.ActualState) error {
 		if key.Kind == reconcile.ReconcileGlobal {
+			if h.config.Base == nil || h.config.DeviceMap == nil {
+				return fmt.Errorf("global change handler dependencies are required")
+			}
 			if _, err := h.config.Base.EnsureBase(ctx, desired, actual); err != nil {
 				return fmt.Errorf("ensure base datapath for global change: %w", err)
 			}
