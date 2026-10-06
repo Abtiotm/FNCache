@@ -40,6 +40,18 @@ func NewAPIHealthMonitor(config APIHealthMonitorConfig) (*APIHealthMonitor, erro
 	return &APIHealthMonitor{source: config.Source, interval: config.Interval, maxStaleness: config.MaxStaleness, now: config.Now}, nil
 }
 
+// Fresh reports whether the most recent successful API observation is still
+// within the configured staleness window without issuing another probe.
+func (m *APIHealthMonitor) Fresh(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if m.source.Health().FreshAt(m.now(), m.maxStaleness) {
+		return nil
+	}
+	return ErrKubernetesAPIStale
+}
+
 func (m *APIHealthMonitor) Check(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err

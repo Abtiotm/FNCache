@@ -370,6 +370,7 @@ func (r *DynamicRuntime) initializeDatapath(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("create dynamic datapath components: %w", err)
 	}
+	components.publisher.SetPublishGuard(r.apiHealth.Fresh)
 	heartbeatControl, ok := components.control.(HeartbeatControl)
 	if !ok {
 		_ = components.Close()
@@ -437,7 +438,7 @@ func (r *DynamicRuntime) initializeDatapath(ctx context.Context) error {
 		_ = components.Close()
 		return err
 	}
-	local, err := NewLocalEndpointHandler(LocalEndpointHandlerConfig{Store: r.store, Resolver: components.endpointResolver, LocalNode: r.config.NodeName, Desired: observer, Scanner: observer, Control: components.control, Endpoint: components.endpoint, Maps: components.maps, Remover: remover, Publisher: components.publisher, Generation: generationTransaction})
+	local, err := NewLocalEndpointHandler(LocalEndpointHandlerConfig{Store: r.store, Resolver: components.endpointResolver, LocalNode: r.config.NodeName, Desired: observer, Scanner: observer, Control: components.control, Endpoint: components.endpoint, Maps: components.maps, Remover: remover, Ownership: components.ownership, Publisher: components.publisher, Generation: generationTransaction})
 	if err != nil {
 		_ = components.Close()
 		return err
@@ -447,7 +448,7 @@ func (r *DynamicRuntime) initializeDatapath(ctx context.Context) error {
 		_ = components.Close()
 		return err
 	}
-	remote, err := NewRemoteChangeHandler(RemoteChangeHandlerConfig{Store: r.store, LocalNode: r.config.NodeName, Desired: observer, Maps: components.mapWriter, Generation: generationTransaction})
+	remote, err := NewRemoteChangeHandler(RemoteChangeHandlerConfig{Store: r.store, LocalNode: r.config.NodeName, Desired: observer, Maps: components.mapWriter, Base: components.base, DeviceMap: components.deviceMap, Generation: generationTransaction})
 	if err != nil {
 		_ = components.Close()
 		return err

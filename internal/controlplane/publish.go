@@ -19,6 +19,8 @@ type ControlPublisher interface {
 	Publish(context.Context, uint64, uint64, uint64, uint32) error
 }
 
+type PublishGuard func(context.Context) error
+
 type PublishConfig struct {
 	InstallationID     string
 	NodeUID            string
@@ -33,6 +35,7 @@ type Publisher struct {
 	store   OwnershipCommitter
 	control ControlPublisher
 	config  PublishConfig
+	guard   PublishGuard
 }
 
 func NewPublisher(store OwnershipCommitter, control ControlPublisher, config PublishConfig) (*Publisher, error) {
@@ -51,13 +54,36 @@ func NewPublisher(store OwnershipCommitter, control ControlPublisher, config Pub
 	return &Publisher{store: store, control: control, config: config}, nil
 }
 
+// SetPublishGuard installs a freshness check before this publisher commits or
+// enables a generation. It must be called before the publisher is used.
+func (p *Publisher) SetPublishGuard(guard PublishGuard) { p.guard = guard }
+
+func (p *Publisher) checkPublishGuard(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if p.guard == nil {
+		return nil
+	}
+	if err := p.guard(ctx); err != nil {
+		return fmt.Errorf("publish guard: %w", err)
+	}
+	return nil
+}
+
 func (p *Publisher) CommitAndPublish(ctx context.Context, desired reconcile.DesiredState, actual reconcile.ActualState) error {
 	if err := VerifyState(desired, actual); err != nil {
+		return err
+	}
+	if err := p.checkPublishGuard(ctx); err != nil {
 		return err
 	}
 	state := p.ownershipState(desired, actual)
 	if err := p.store.Commit(ctx, state); err != nil {
 		return fmt.Errorf("commit ownership: %w", err)
+	}
+	if err := p.checkPublishGuard(ctx); err != nil {
+		return err
 	}
 	if err := p.control.Publish(ctx, desired.Generation, p.config.HeartbeatNS, p.config.HeartbeatTimeoutNS, p.config.Flags); err != nil {
 		return fmt.Errorf("publish generation %d: %w", desired.Generation, err)
@@ -65,9 +91,35 @@ func (p *Publisher) CommitAndPublish(ctx context.Context, desired reconcile.Desi
 	return nil
 }
 
+func endpointScanCompletenessError(skipped map[string]string) error {
+	if len(skipped) == 0 {
+		return nil
+	}
+	return reconcile.NewClassifiedError(
+		reconcile.ErrorRetryable,
+		reconcile.ReasonEndpointNotReady,
+		0,
+		fmt.Errorf("endpoint scan incomplete: %d endpoint(s) skipped", len(skipped)),
+	)
+}
+
+func validateEndpointScanCompleteness(desired reconcile.DesiredState) error {
+	return endpointScanCompletenessError(desired.EndpointScanSkipped)
+}
+
+func validateActualEndpointScanCompleteness(actual reconcile.ActualState) error {
+	return endpointScanCompletenessError(actual.EndpointScanSkipped)
+}
+
 func VerifyState(desired reconcile.DesiredState, actual reconcile.ActualState) error {
 	if !desired.Enabled {
 		return fmt.Errorf("cannot publish disabled desired state")
+	}
+	if err := validateEndpointScanCompleteness(desired); err != nil {
+		return err
+	}
+	if err := validateActualEndpointScanCompleteness(actual); err != nil {
+		return err
 	}
 	if !actual.Control.Verified || actual.Control.Enabled {
 		return fmt.Errorf("cannot publish while actual control Map is enabled or unverified")

@@ -12,9 +12,10 @@ import (
 )
 
 type backendObserver struct {
-	desired reconcile.DesiredState
-	actual  reconcile.ActualState
-	scans   int
+	desired        reconcile.DesiredState
+	actual         reconcile.ActualState
+	actualSequence []reconcile.ActualState
+	scans          int
 }
 
 func (f *backendObserver) Discover(context.Context) (reconcile.DesiredState, error) {
@@ -22,6 +23,13 @@ func (f *backendObserver) Discover(context.Context) (reconcile.DesiredState, err
 }
 func (f *backendObserver) Scan(context.Context) (reconcile.ActualState, error) {
 	f.scans++
+	if len(f.actualSequence) != 0 {
+		index := f.scans - 1
+		if index >= len(f.actualSequence) {
+			index = len(f.actualSequence) - 1
+		}
+		return f.actualSequence[index], nil
+	}
 	return f.actual, nil
 }
 
@@ -113,6 +121,45 @@ func TestFirstPassBackendRunsAllStagesAndPublishesLastScan(t *testing.T) {
 	}
 }
 
+func TestFirstPassBackendRechecksPublishGuardBeforeControlPublish(t *testing.T) {
+	desired := publishTestDesired()
+	events := []string{}
+	store := &fakeOwnershipCommitter{events: &events}
+	publish := &fakeControlPublisher{events: &events}
+	publisher, err := NewPublisher(store, publish, publishTestConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantErr := errors.New("Kubernetes state became stale")
+	checks := 0
+	publisher.SetPublishGuard(func(context.Context) error {
+		checks++
+		if checks == 2 {
+			return wantErr
+		}
+		return nil
+	})
+	backend, err := NewFirstPassBackend(FirstPassBackendConfig{
+		Observer: &backendObserver{desired: desired, actual: publishTestActual(desired)}, Control: &backendControl{},
+		Collection: &backendCollection{}, Marker: &backendMarker{}, Base: &backendEnsurer{}, Endpoint: &backendEnsurer{}, Maps: &backendEnsurer{},
+		Ownership: store, Remover: &backendRemover{}, Publisher: publisher,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator, err := reconcile.NewCoordinator(backend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := coordinator.FullReconcile(context.Background())
+	if !errors.Is(err, wantErr) || result.State != reconcile.AgentDisabled {
+		t.Fatalf("stale publish was not rejected: result=%+v err=%v", result, err)
+	}
+	if checks != 2 || len(events) != 1 || events[0] != "commit" {
+		t.Fatalf("stale state reached control publish: checks=%d events=%v", checks, events)
+	}
+}
+
 func TestFirstPassBackendLeavesUnsupportedNodeDisabled(t *testing.T) {
 	desired := publishTestDesired()
 	desired.Enabled = false
@@ -146,6 +193,115 @@ func TestFirstPassBackendLeavesUnsupportedNodeDisabled(t *testing.T) {
 	}
 	if observer.scans != 0 || collection.calls != 0 || marker.calls != 0 || base.calls != 0 || endpoint.calls != 0 || maps.calls != 0 || len(*store.events) != 0 {
 		t.Fatalf("disabled path performed unsafe work: scans=%d collection=%d marker=%d base=%d endpoint=%d maps=%d events=%v", observer.scans, collection.calls, marker.calls, base.calls, endpoint.calls, maps.calls, *store.events)
+	}
+}
+
+func TestFirstPassBackendPreservesOwnershipWhenEndpointScanIsIncomplete(t *testing.T) {
+	desired := publishTestDesired()
+	desired.EndpointScanSkipped = map[string]string{"pod-skipped": resolver.ErrEndpointNotReady.Error()}
+	owned := reconcile.OwnedEndpoint{PodUID: "pod-old", PodIPv4: netip.MustParseAddr("10.244.1.11"), NetNSInode: 43, PeerIfIndex: 11, HostIfIndex: 21}
+	store := &fakeOwnershipCommitter{events: new([]string), state: reconcile.OwnershipState{
+		SchemaVersion: 1, InstallationID: "install-a", NodeUID: "node-a", ELFBuildID: "sha256:build", ABI: reconcile.BPFABIVersion,
+		Endpoints: map[string]reconcile.OwnedEndpoint{"pod-old": owned},
+	}}
+	publisher, err := NewPublisher(store, &fakeControlPublisher{events: store.events}, publishTestConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	collection := &backendCollection{}
+	remover := &backendRemover{}
+	backend, err := NewFirstPassBackend(FirstPassBackendConfig{
+		Observer: &backendObserver{desired: desired, actual: publishTestActual(desired)}, Control: &backendControl{},
+		Collection: collection, Marker: &backendMarker{}, Base: &backendEnsurer{}, Endpoint: &backendEnsurer{}, Maps: &backendEnsurer{},
+		Ownership: store, Remover: remover, Publisher: publisher,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator, err := reconcile.NewCoordinator(backend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := coordinator.FullReconcile(context.Background())
+	var classified *reconcile.ClassifiedError
+	if !errors.As(err, &classified) || classified.Class() != reconcile.ErrorRetryable || result.State != reconcile.AgentDisabled {
+		t.Fatalf("incomplete endpoint scan was not blocked safely: result=%+v err=%v", result, err)
+	}
+	if collection.calls != 0 || remover.calls != 0 || len(*store.events) != 0 {
+		t.Fatalf("incomplete endpoint scan performed mutation: collection=%d remover=%d events=%v", collection.calls, remover.calls, *store.events)
+	}
+	if _, ok := store.state.Endpoints[owned.PodUID]; !ok {
+		t.Fatalf("existing ownership was lost: state=%+v", store.state)
+	}
+}
+
+func TestFirstPassBackendStopsBeforeMutationWhenActualScanIsIncomplete(t *testing.T) {
+	desired := publishTestDesired()
+	actual := publishTestActual(desired)
+	actual.EndpointScanSkipped = map[string]string{"pod-skipped": resolver.ErrEndpointNotReady.Error()}
+	store := &fakeOwnershipCommitter{events: new([]string)}
+	publisher, err := NewPublisher(store, &fakeControlPublisher{events: store.events}, publishTestConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	collection := &backendCollection{}
+	backend, err := NewFirstPassBackend(FirstPassBackendConfig{
+		Observer: &backendObserver{desired: desired, actual: actual}, Control: &backendControl{},
+		Collection: collection, Marker: &backendMarker{}, Base: &backendEnsurer{}, Endpoint: &backendEnsurer{}, Maps: &backendEnsurer{},
+		Ownership: store, Remover: &backendRemover{}, Publisher: publisher,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator, err := reconcile.NewCoordinator(backend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := coordinator.FullReconcile(context.Background())
+	var classified *reconcile.ClassifiedError
+	if !errors.As(err, &classified) || classified.Class() != reconcile.ErrorRetryable || result.State != reconcile.AgentDisabled {
+		t.Fatalf("incomplete actual scan was not blocked safely: result=%+v err=%v", result, err)
+	}
+	if collection.calls != 0 || len(*store.events) != 0 {
+		t.Fatalf("incomplete actual scan performed mutation: collection=%d events=%v", collection.calls, *store.events)
+	}
+}
+
+func TestFirstPassBackendStopsBeforeDownstreamMutationWhenRescanIsIncomplete(t *testing.T) {
+	desired := publishTestDesired()
+	first := publishTestActual(desired)
+	second := publishTestActual(desired)
+	second.EndpointScanSkipped = map[string]string{"pod-skipped": resolver.ErrEndpointNotReady.Error()}
+	observer := &backendObserver{desired: desired, actualSequence: []reconcile.ActualState{first, second}}
+	store := &fakeOwnershipCommitter{events: new([]string)}
+	publisher, err := NewPublisher(store, &fakeControlPublisher{events: store.events}, publishTestConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	collection := &backendCollection{}
+	marker := &backendMarker{}
+	base := &backendEnsurer{}
+	endpoint := &backendEnsurer{}
+	maps := &backendEnsurer{}
+	remover := &backendRemover{}
+	backend, err := NewFirstPassBackend(FirstPassBackendConfig{
+		Observer: observer, Control: &backendControl{}, Collection: collection, Marker: marker,
+		Base: base, Endpoint: endpoint, Maps: maps, Ownership: store, Remover: remover, Publisher: publisher,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator, err := reconcile.NewCoordinator(backend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := coordinator.FullReconcile(context.Background())
+	var classified *reconcile.ClassifiedError
+	if !errors.As(err, &classified) || classified.Class() != reconcile.ErrorRetryable || result.State != reconcile.AgentDisabled {
+		t.Fatalf("incomplete rescan was not blocked safely: result=%+v err=%v", result, err)
+	}
+	if observer.scans < 2 || base.calls != 0 || endpoint.calls != 0 || maps.calls != 0 || remover.calls != 0 || len(*store.events) != 0 {
+		t.Fatalf("incomplete rescan reached downstream mutation: scans=%d base=%d endpoint=%d maps=%d remover=%d events=%v", observer.scans, base.calls, endpoint.calls, maps.calls, remover.calls, *store.events)
 	}
 }
 

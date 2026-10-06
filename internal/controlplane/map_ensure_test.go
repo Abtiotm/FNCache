@@ -59,6 +59,47 @@ func TestMapEnsurerWritesABIEntries(t *testing.T) {
 	}
 }
 
+func TestMapEnsurerWritesDeviceMapWithoutEndpoint(t *testing.T) {
+	store := &fakeMapStore{}
+	ensurer, err := NewMapEnsurer(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint := mapEnsureTestEndpoint()
+	desired := mapEnsureDesired(endpoint)
+	desired.LocalEndpoints = nil
+	changed, err := ensurer.EnsureDeviceMap(context.Background(), desired, mapEnsureActual(), true)
+	if err != nil || !changed || len(store.calls) != 1 || store.calls[0] != "devmap" {
+		t.Fatalf("unexpected device Map ensure: changed=%v calls=%v err=%v", changed, store.calls, err)
+	}
+	device := store.values["devmap"]
+	if len(store.keys["devmap"]) != 4 || len(device) != 12 ||
+		binary.NativeEndian.Uint32(store.keys["devmap"]) != 2 ||
+		string(device[:4]) != string([]byte{192, 0, 2, 10}) ||
+		string(device[4:10]) != string([]byte{2, 0, 0, 0, 0, 1}) {
+		t.Fatalf("unexpected device Map entry: key=%v value=%v", store.keys["devmap"], device)
+	}
+}
+
+func TestMapEnsurerDeviceMapRequiresDisabledVerifiedPath(t *testing.T) {
+	store := &fakeMapStore{}
+	ensurer, _ := NewMapEnsurer(store)
+	desired := mapEnsureDesired(mapEnsureTestEndpoint())
+	if _, err := ensurer.EnsureDeviceMap(context.Background(), desired, mapEnsureActual(), false); err == nil || len(store.calls) != 0 {
+		t.Fatalf("device Map update ran while fast path was enabled: err=%v calls=%v", err, store.calls)
+	}
+	actual := mapEnsureActual()
+	actual.Control.Enabled = true
+	if _, err := ensurer.EnsureDeviceMap(context.Background(), desired, actual, true); err == nil || len(store.calls) != 0 {
+		t.Fatalf("enabled control Map was accepted: err=%v calls=%v", err, store.calls)
+	}
+	actual = mapEnsureActual()
+	actual.Control.Verified = false
+	if _, err := ensurer.EnsureDeviceMap(context.Background(), desired, actual, true); err == nil || len(store.calls) != 0 {
+		t.Fatalf("unverified control Map was accepted: err=%v calls=%v", err, store.calls)
+	}
+}
+
 func TestMapEnsurerIsIdempotentAndRequiresDisabledPath(t *testing.T) {
 	store := &fakeMapStore{}
 	ensurer, _ := NewMapEnsurer(store)

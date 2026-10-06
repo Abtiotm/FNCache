@@ -49,6 +49,54 @@ func TestEventDispatcherEnqueuesInformerAndMigrationEvents(t *testing.T) {
 	}
 }
 
+func TestInformerSourceUpdatesSnapshotBeforeDispatch(t *testing.T) {
+	store := NewSnapshotStore()
+	pod := informerPod()
+	if err := store.UpsertPod(resolverPodSnapshot(pod)); err != nil {
+		t.Fatal(err)
+	}
+	source, err := NewInformerSource(fake.NewSimpleClientset(), store, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	classifier, _ := NewEventClassifier("node-a")
+	target, _ := queue.New(queue.DefaultConfig())
+	t.Cleanup(target.ShutDown)
+	if _, err := NewEventDispatcher(source, classifier, target); err != nil {
+		t.Fatal(err)
+	}
+
+	var snapshotPresentDuringDispatch bool
+	source.eventMu.Lock()
+	dispatch := source.podEventHandler
+	if dispatch == nil {
+		source.eventMu.Unlock()
+		t.Fatal("Pod event handler was not attached")
+	}
+	source.podEventHandler = func(oldObj, newObj interface{}) {
+		_, snapshotPresentDuringDispatch = store.GetPod(string(pod.UID))
+		dispatch(oldObj, newObj)
+	}
+	source.eventMu.Unlock()
+
+	source.deletePod(pod)
+	if snapshotPresentDuringDispatch {
+		t.Fatal("Pod snapshot was present during dispatch")
+	}
+	if _, ok := store.GetPod(string(pod.UID)); ok {
+		t.Fatal("Pod snapshot was not removed before dispatch")
+	}
+	if target.Len() != 1 {
+		t.Fatalf("dispatch queue length = %d, want 1", target.Len())
+	}
+	key, shutdown := target.Get()
+	if shutdown || key.Kind != reconcile.ReconcileLocalEndpoint || key.UID != string(pod.UID) {
+		t.Fatalf("delete key = %#v shutdown=%v", key, shutdown)
+	}
+	target.Forget(key)
+	target.Done(key)
+}
+
 func TestEventDispatcherHandlesTombstone(t *testing.T) {
 	source, err := NewInformerSource(fake.NewSimpleClientset(), NewSnapshotStore(), 0)
 	if err != nil {

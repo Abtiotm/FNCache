@@ -137,6 +137,12 @@ func (b *FirstPassBackend) Ensure(ctx context.Context, desired reconcile.Desired
 	if !desired.Enabled {
 		return false, nil
 	}
+	if err := validateEndpointScanCompleteness(desired); err != nil {
+		return false, err
+	}
+	if err := validateActualEndpointScanCompleteness(actual); err != nil {
+		return false, err
+	}
 	ownershipState, hasOwnership, err := b.loadOwnership(ctx)
 	if err != nil {
 		return false, err
@@ -158,6 +164,9 @@ func (b *FirstPassBackend) Ensure(ctx context.Context, desired reconcile.Desired
 	current, err := b.observer.Scan(ctx)
 	if err != nil {
 		return changed, fmt.Errorf("rescan after collection ensure: %w", err)
+	}
+	if err := validateActualEndpointScanCompleteness(current); err != nil {
+		return changed, err
 	}
 	cleanupChanged, err := b.cleanupStaleEndpoints(ctx, desired, current, ownershipState, hasOwnership)
 	if err != nil {
@@ -256,6 +265,9 @@ func (b *FirstPassBackend) Commit(ctx context.Context, desired reconcile.Desired
 	if err := VerifyState(desired, actual); err != nil {
 		return err
 	}
+	if err := b.publisher.checkPublishGuard(ctx); err != nil {
+		return err
+	}
 	if err := b.publisher.store.Commit(ctx, b.publisher.ownershipState(desired, actual)); err != nil {
 		return fmt.Errorf("commit ownership: %w", err)
 	}
@@ -263,6 +275,12 @@ func (b *FirstPassBackend) Commit(ctx context.Context, desired reconcile.Desired
 }
 
 func (b *FirstPassBackend) Publish(ctx context.Context, desired reconcile.DesiredState) error {
+	if err := validateEndpointScanCompleteness(desired); err != nil {
+		return err
+	}
+	if err := b.publisher.checkPublishGuard(ctx); err != nil {
+		return err
+	}
 	config := b.publisher.config
 	return b.publisher.control.Publish(ctx, desired.Generation, config.HeartbeatNS, config.HeartbeatTimeoutNS, config.Flags)
 }

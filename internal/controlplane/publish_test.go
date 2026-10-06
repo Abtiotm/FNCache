@@ -99,6 +99,97 @@ func TestPublisherCommitsOwnershipBeforePublishing(t *testing.T) {
 	}
 }
 
+func TestPublisherBlocksWhenPublishGuardFailsBeforeCommit(t *testing.T) {
+	desired := publishTestDesired()
+	actual := publishTestActual(desired)
+	events := []string{}
+	store := &fakeOwnershipCommitter{events: &events}
+	control := &fakeControlPublisher{events: &events}
+	publisher, err := NewPublisher(store, control, publishTestConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantErr := errors.New("Kubernetes state is stale")
+	publisher.SetPublishGuard(func(context.Context) error { return wantErr })
+	if err := publisher.CommitAndPublish(context.Background(), desired, actual); !errors.Is(err, wantErr) {
+		t.Fatalf("publish guard error = %v, want %v", err, wantErr)
+	}
+	if len(events) != 0 {
+		t.Fatalf("stale state reached ownership or control publish: %v", events)
+	}
+}
+
+func TestPublisherRechecksPublishGuardBeforeControlPublish(t *testing.T) {
+	desired := publishTestDesired()
+	actual := publishTestActual(desired)
+	events := []string{}
+	store := &fakeOwnershipCommitter{events: &events}
+	control := &fakeControlPublisher{events: &events}
+	publisher, err := NewPublisher(store, control, publishTestConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantErr := errors.New("Kubernetes state became stale")
+	checks := 0
+	publisher.SetPublishGuard(func(context.Context) error {
+		checks++
+		if checks == 2 {
+			return wantErr
+		}
+		return nil
+	})
+	if err := publisher.CommitAndPublish(context.Background(), desired, actual); !errors.Is(err, wantErr) {
+		t.Fatalf("publish guard error = %v, want %v", err, wantErr)
+	}
+	if checks != 2 || len(events) != 1 || events[0] != "commit" {
+		t.Fatalf("publish guard did not stop control publish: checks=%d events=%v", checks, events)
+	}
+}
+
+func TestPublisherRejectsIncompleteEndpointScanBeforeCommit(t *testing.T) {
+	desired := publishTestDesired()
+	desired.EndpointScanSkipped = map[string]string{"pod-skipped": resolver.ErrEndpointNotReady.Error()}
+	actual := publishTestActual(desired)
+	events := []string{}
+	store := &fakeOwnershipCommitter{events: &events}
+	control := &fakeControlPublisher{events: &events}
+	publisher, err := NewPublisher(store, control, publishTestConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = publisher.CommitAndPublish(context.Background(), desired, actual)
+	var classified *reconcile.ClassifiedError
+	if !errors.As(err, &classified) || classified.Class() != reconcile.ErrorRetryable || classified.ReasonCode() != reconcile.ReasonEndpointNotReady {
+		t.Fatalf("incomplete endpoint scan was not retryable: err=%v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("incomplete endpoint scan reached publication: events=%v", events)
+	}
+}
+
+func TestPublisherRejectsIncompleteActualScanBeforeCommit(t *testing.T) {
+	desired := publishTestDesired()
+	actual := publishTestActual(desired)
+	actual.EndpointScanSkipped = map[string]string{"pod-skipped": resolver.ErrEndpointNotReady.Error()}
+	events := []string{}
+	store := &fakeOwnershipCommitter{events: &events}
+	control := &fakeControlPublisher{events: &events}
+	publisher, err := NewPublisher(store, control, publishTestConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = publisher.CommitAndPublish(context.Background(), desired, actual)
+	var classified *reconcile.ClassifiedError
+	if !errors.As(err, &classified) || classified.Class() != reconcile.ErrorRetryable || classified.ReasonCode() != reconcile.ReasonEndpointNotReady {
+		t.Fatalf("incomplete actual scan was not retryable: err=%v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("incomplete actual scan reached publication: events=%v", events)
+	}
+}
+
 func TestPublisherDoesNotCommitWhenVerificationFails(t *testing.T) {
 	desired := publishTestDesired()
 	actual := publishTestActual(desired)
