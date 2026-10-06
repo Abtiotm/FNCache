@@ -2,12 +2,14 @@ package datapath
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/cat-cc-Lcos/FNCache/internal/discovery"
 	"github.com/cat-cc-Lcos/FNCache/internal/reconcile"
 	"github.com/cat-cc-Lcos/FNCache/internal/resolver"
+	"github.com/vishvananda/netlink"
 )
 
 type TCScanner struct {
@@ -42,6 +44,10 @@ func (s *TCScanner) Scan(ctx context.Context, links []resolver.LinkIdentity) (re
 		}
 		filters, err := s.manager.ListFilters(ctx, link)
 		if err != nil {
+			var notFound netlink.LinkNotFoundError
+			if errors.As(err, &notFound) {
+				continue
+			}
 			return reconcile.ActualState{}, fmt.Errorf("scan TC filters on ifindex %d: %w", link.IfIndex, err)
 		}
 		for _, filter := range filters {

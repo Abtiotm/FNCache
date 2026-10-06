@@ -35,3 +35,11 @@ recovery. The test preserves strict BPF, TC, netfilter and packet-capture
 evidence in `ONCACHE_M4_ACCEL_EVIDENCE` (or a temporary directory by default).
 For an already-installed agent, `ONCACHE_M4_ACCEL_REUSE=1` skips only the
 initial Helm deployment and still runs the traffic and failure gates.
+
+## M5.5 lifecycle resilience
+
+Set `ONCACHE_M5_LIFECYCLE_E2E=1` and run `make -C tests test-m5-lifecycle` to
+exercise Pod churn, bounded PodIP reuse, and a paused-agent event-loss/resync
+scenario. `ONCACHE_M5_CHURN_ROUNDS` defaults to 30 and is bounded to 200.
+`ONCACHE_M5_RESYNC_INTERVAL` defaults to `15s` for the local VM baseline and
+can be increased for a quieter control-plane run.
