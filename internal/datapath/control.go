@@ -13,6 +13,12 @@ import (
 
 const controlMapABIVersion uint32 = 1
 
+const (
+	controlVXLANUDPShift        = 16
+	controlVXLANUDPMask  uint32 = 0xffff0000
+	controlVXLANMaxVNI   uint32 = 0xffffff
+)
+
 var ErrControlMapNotReady = errors.New("control Map is not ready")
 
 type ControlV1 struct {
@@ -126,12 +132,16 @@ func (w *ControlWriter) Initialize(ctx context.Context) error {
 	return nil
 }
 
-func (w *ControlWriter) Publish(ctx context.Context, generation, heartbeatNS, heartbeatTimeoutNS uint64, flags uint32) error {
+func (w *ControlWriter) Publish(ctx context.Context, generation, heartbeatNS, heartbeatTimeoutNS uint64, flags uint32, vxlanVNI uint32, vxlanUDPPort uint16) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if heartbeatNS == 0 || heartbeatTimeoutNS == 0 {
 		return fmt.Errorf("heartbeat values must be non-zero")
+	}
+	encodedFlags, err := encodeVXLANControl(flags, vxlanVNI, vxlanUDPPort)
+	if err != nil {
+		return err
 	}
 	path := filepath.Join(w.pinRoot, "maps", "control_map")
 	control, err := w.open(path)
@@ -152,8 +162,8 @@ func (w *ControlWriter) Publish(ctx context.Context, generation, heartbeatNS, he
 	value.Generation = generation
 	value.HeartbeatNS = heartbeatNS
 	value.HeartbeatTimeoutNS = heartbeatTimeoutNS
-	value.Flags = flags
-	value.Reserved = 0
+	value.Flags = encodedFlags
+	value.Reserved = vxlanVNI
 	if err := control.Update(key, &value, ebpf.UpdateAny); err != nil {
 		return fmt.Errorf("publish fast path: %w", err)
 	}
@@ -206,6 +216,19 @@ func validateControlValue(value ControlV1) error {
 		return fmt.Errorf("control Map ABI mismatch: got %d want %d", value.ABIVersion, controlMapABIVersion)
 	}
 	return nil
+}
+
+func encodeVXLANControl(flags uint32, vni uint32, udpPort uint16) (uint32, error) {
+	if vni == 0 || vni > controlVXLANMaxVNI {
+		return 0, fmt.Errorf("invalid VXLAN VNI: %d", vni)
+	}
+	if udpPort == 0 {
+		return 0, fmt.Errorf("invalid VXLAN UDP port: %d", udpPort)
+	}
+	if flags&controlVXLANUDPMask != 0 {
+		return 0, fmt.Errorf("control flags use reserved VXLAN UDP port bits")
+	}
+	return flags | (uint32(udpPort) << controlVXLANUDPShift), nil
 }
 
 func openPinnedControlMap(path string) (controlMap, error) {

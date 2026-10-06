@@ -129,8 +129,8 @@ func (c *runtimeControl) Disable(ctx context.Context) error {
 	return c.writer.Disable(ctx)
 }
 
-func (c *runtimeControl) Publish(ctx context.Context, generation, heartbeatNS, heartbeatTimeoutNS uint64, flags uint32) error {
-	return c.writer.Publish(ctx, generation, heartbeatNS, heartbeatTimeoutNS, flags)
+func (c *runtimeControl) Publish(ctx context.Context, generation, heartbeatNS, heartbeatTimeoutNS uint64, flags uint32, vxlanVNI uint32, vxlanUDPPort uint16) error {
+	return c.writer.Publish(ctx, generation, heartbeatNS, heartbeatTimeoutNS, flags, vxlanVNI, vxlanUDPPort)
 }
 
 func (c *runtimeControl) RefreshHeartbeat(ctx context.Context, heartbeatNS uint64) error {

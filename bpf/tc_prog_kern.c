@@ -165,6 +165,14 @@ int tc_masq(struct __sk_buff *ctx) {
         oncache_stat_inc(ONCACHE_STAT_MASQ_INGRESS_NOT_READY);
         goto out;
     }
+    __be16 cached_udp_dest;
+    __builtin_memcpy(&cached_udp_dest,
+                     egressinfo_->outer_header + VXLAN_UDP_DEST_OFF,
+                     sizeof(cached_udp_dest));
+    if (!oncache_vxlan_header_matches_config(
+            cached_udp_dest, egressinfo_->outer_header + VXLAN_HEADER_OFF)) {
+        goto out;
+    }
     if (!oncache_redirect_target_valid(egressinfo_->ifindex, (__u32)ctx->ifindex)) {
         goto out;
     }

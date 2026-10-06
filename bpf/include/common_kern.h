@@ -67,6 +67,32 @@ static __always_inline int parse_ipv4_header(
     return 1;
 }
 
+static __always_inline int oncache_vxlan_header_matches_config(
+        __be16 udp_dest, const __u8 *vxlan) {
+    __u32 key = 0;
+    struct oncache_control_v1 *control =
+        bpf_map_lookup_elem(&control_map, &key);
+    if (!control) return 0;
+
+    __u16 expected_port =
+        (__u16)(control->flags >> ONCACHE_CONTROL_VXLAN_UDP_SHIFT);
+    __u32 expected_vni = control->reserved;
+    if (expected_port == 0 || expected_vni == 0 || expected_vni > 0xffffffU) {
+        return 0;
+    }
+    if (udp_dest != bpf_htons(expected_port)) return 0;
+
+    if (vxlan[0] != ONCACHE_VXLAN_I_FLAG ||
+        vxlan[1] != 0 || vxlan[2] != 0 || vxlan[3] != 0 || vxlan[7] != 0) {
+        return 0;
+    }
+
+    __u32 packet_vni = ((__u32)vxlan[4] << 16) |
+                       ((__u32)vxlan[5] << 8) |
+                       (__u32)vxlan[6];
+    return packet_vni == expected_vni;
+}
+
 static __always_inline int parse_vxlan_ipv4(
         struct iphdr *outer_iph,
         void *data_end,
@@ -89,10 +115,7 @@ static __always_inline int parse_vxlan_ipv4(
 
     __u8 *vxlan = (void *)(udph + 1);
     if (data_end < (void *)(vxlan + VXLANLEN)) return 0;
-    if (vxlan[0] != ONCACHE_VXLAN_I_FLAG ||
-        vxlan[1] != 0 || vxlan[2] != 0 || vxlan[3] != 0 || vxlan[7] != 0) {
-        return 0;
-    }
+    if (!oncache_vxlan_header_matches_config(udph->dest, vxlan)) return 0;
 
     struct ethhdr *inner_eth = (void *)((__u8 *)udph + sizeof(*udph) + VXLANLEN);
     if (data_end < (void *)(inner_eth + 1) ||
@@ -208,6 +231,8 @@ static __always_inline void initegressinfo(struct oncache_egress_v1* ci, const v
 #define TCP_CSUM_OFF (ETH_HLEN + sizeof(struct iphdr) + offsetof(struct tcphdr, check))
 #define UDP_CSUM_OFF (ETH_HLEN + sizeof(struct iphdr) + offsetof(struct udphdr, check))
 #define UDP_LEN_OFF (ETH_HLEN + sizeof(struct iphdr) + offsetof(struct udphdr, len))
+#define VXLAN_UDP_DEST_OFF (ETH_HLEN + sizeof(struct iphdr) + offsetof(struct udphdr, dest))
+#define VXLAN_HEADER_OFF (ETH_HLEN + sizeof(struct iphdr) + sizeof(struct udphdr))
 #define IS_PSEUDO 0x10
 #define IS_SRC 1
 #define IS_DST 2

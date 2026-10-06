@@ -32,7 +32,7 @@ func (s *remoteTestOwnership) Commit(context.Context, reconcile.OwnershipState) 
 
 type remoteTestControlPublisher struct{ publishes int }
 
-func (p *remoteTestControlPublisher) Publish(context.Context, uint64, uint64, uint64, uint32) error {
+func (p *remoteTestControlPublisher) Publish(context.Context, uint64, uint64, uint64, uint32, uint32, uint16) error {
 	p.publishes++
 	return nil
 }
