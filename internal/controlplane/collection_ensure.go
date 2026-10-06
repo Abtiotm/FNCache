@@ -67,9 +67,6 @@ func (e *CollectionEnsurer) EnsureCollection(ctx context.Context, desired reconc
 	if !desired.Enabled {
 		return false, nil
 	}
-	if collectionReady(actual) {
-		return false, nil
-	}
 	file, err := os.Open(e.elfPath)
 	if err != nil {
 		return false, fmt.Errorf("open BPF ELF: %w", err)
@@ -83,6 +80,9 @@ func (e *CollectionEnsurer) EnsureCollection(ctx context.Context, desired reconc
 	spec, err := ops.loadCollection(file, schema)
 	if err != nil {
 		return false, fmt.Errorf("load BPF collection: %w", err)
+	}
+	if collectionReady(actual, spec) {
+		return false, nil
 	}
 	loaded, err := ops.loadAndPin(spec, schema)
 	if err != nil {
@@ -98,14 +98,25 @@ func (e *CollectionEnsurer) EnsureCollection(ctx context.Context, desired reconc
 	}
 	return true, nil
 }
-func collectionReady(actual reconcile.ActualState) bool {
+
+func collectionReady(actual reconcile.ActualState, spec *ebpf.CollectionSpec) bool {
+	if spec == nil {
+		return false
+	}
 	schema := datapath.V1Schema()
 	if len(actual.Programs) != len(schema.Programs) || len(actual.Maps) != len(schema.Maps) {
 		return false
 	}
 	for _, name := range schema.Programs {
 		program, ok := actual.Programs[name]
-		if !ok || program.ID == 0 {
+		expected, expectedOK := spec.Programs[name]
+		if !ok || program.ID == 0 || !expectedOK || expected == nil {
+			return false
+		}
+		if program.Name != "" && program.Name != name {
+			return false
+		}
+		if err := expected.Compatible(&ebpf.ProgramInfo{Tag: program.Tag}); err != nil {
 			return false
 		}
 	}

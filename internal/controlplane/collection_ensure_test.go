@@ -11,6 +11,7 @@ import (
 	"github.com/cat-cc-Lcos/FNCache/internal/datapath"
 	"github.com/cat-cc-Lcos/FNCache/internal/reconcile"
 	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/asm"
 )
 
 type fakeCollectionHandle struct {
@@ -22,16 +23,59 @@ func (h *fakeCollectionHandle) Unpin() error { h.unpinCalls++; return nil }
 func (h *fakeCollectionHandle) Close() error { h.closeCalls++; return nil }
 
 func TestCollectionEnsurerSkipsReadyCollection(t *testing.T) {
-	called := false
-	ensurer, err := newCollectionEnsurer("/tmp/oncache-test.o", "/sys/fs/bpf/oncache/v1", func(string) (collectionOps, error) {
-		called = true
-		return collectionOps{}, nil
+	elf := filepath.Join(t.TempDir(), "datapath.o")
+	if err := os.WriteFile(elf, []byte("elf"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	spec := testCollectionSpec()
+	loaded := false
+	ensurer, err := newCollectionEnsurer(elf, "/sys/fs/bpf/oncache/v1", func(string) (collectionOps, error) {
+		return collectionOps{
+			loadCollection: func(io.ReaderAt, datapath.CollectionSchema) (*ebpf.CollectionSpec, error) {
+				return spec, nil
+			},
+			loadAndPin: func(*ebpf.CollectionSpec, datapath.CollectionSchema) (collectionHandle, error) {
+				loaded = true
+				return nil, errors.New("ready collection should not be loaded")
+			},
+		}, nil
 	}, func(context.Context, string) error { return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
-	if changed, err := ensurer.EnsureCollection(context.Background(), reconcile.DesiredState{Enabled: true}, readyCollectionState()); err != nil || changed || called {
-		t.Fatalf("ready collection was not a no-op: changed=%v err=%v called=%v", changed, err, called)
+	if changed, err := ensurer.EnsureCollection(context.Background(), reconcile.DesiredState{Enabled: true}, readyCollectionState(t, spec)); err != nil || changed || loaded {
+		t.Fatalf("ready collection was not a no-op: changed=%v err=%v loaded=%v", changed, err, loaded)
+	}
+}
+
+func TestCollectionEnsurerDoesNotSkipStaleProgram(t *testing.T) {
+	elf := filepath.Join(t.TempDir(), "datapath.o")
+	if err := os.WriteFile(elf, []byte("elf"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	spec := testCollectionSpec()
+	handle := &fakeCollectionHandle{}
+	loaded := false
+	ensurer, err := newCollectionEnsurer(elf, filepath.Join(t.TempDir(), "bpf"), func(string) (collectionOps, error) {
+		return collectionOps{
+			loadCollection: func(io.ReaderAt, datapath.CollectionSchema) (*ebpf.CollectionSpec, error) {
+				return spec, nil
+			},
+			loadAndPin: func(*ebpf.CollectionSpec, datapath.CollectionSchema) (collectionHandle, error) {
+				loaded = true
+				return handle, nil
+			},
+		}, nil
+	}, func(context.Context, string) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual := readyCollectionState(t, spec)
+	staleProgram := actual.Programs["tc_masq"]
+	staleProgram.Tag = "stale-program-tag"
+	actual.Programs["tc_masq"] = staleProgram
+	if changed, err := ensurer.EnsureCollection(context.Background(), reconcile.DesiredState{Enabled: true}, actual); err != nil || !changed || !loaded || handle.closeCalls != 1 {
+		t.Fatalf("stale program was incorrectly treated as ready: changed=%v err=%v loaded=%v handle=%+v", changed, err, loaded, handle)
 	}
 }
 
@@ -89,14 +133,38 @@ func TestCollectionEnsurerRollsBackWhenControlInitializationFails(t *testing.T) 
 	}
 }
 
-func readyCollectionState() reconcile.ActualState {
+func readyCollectionState(t *testing.T, spec *ebpf.CollectionSpec) reconcile.ActualState {
+	t.Helper()
 	schema := datapath.V1Schema()
 	actual := reconcile.ActualState{Programs: make(map[string]reconcile.ProgramState), Maps: make(map[string]reconcile.MapState)}
 	for _, name := range schema.Programs {
-		actual.Programs[name] = reconcile.ProgramState{ID: 1, Name: name}
+		program := spec.Programs[name]
+		tag, err := program.Tag()
+		if err != nil {
+			t.Fatalf("calculate tag for %s: %v", name, err)
+		}
+		actual.Programs[name] = reconcile.ProgramState{ID: 1, Name: name, Tag: tag}
 	}
 	for _, expected := range schema.Maps {
 		actual.Maps[expected.Name] = reconcile.MapState{ID: 1, Name: expected.Name, KeySize: expected.KeySize, ValueSize: expected.ValueSize, MaxEntries: expected.MaxEntries}
 	}
 	return actual
+}
+
+func testCollectionSpec() *ebpf.CollectionSpec {
+	schema := datapath.V1Schema()
+	spec := &ebpf.CollectionSpec{Programs: make(map[string]*ebpf.ProgramSpec), Maps: make(map[string]*ebpf.MapSpec)}
+	for index, name := range schema.Programs {
+		spec.Programs[name] = &ebpf.ProgramSpec{
+			Name:         name,
+			Instructions: asm.Instructions{asm.LoadImm(asm.R0, int64(index), asm.DWord), asm.Return()},
+		}
+	}
+	for _, expected := range schema.Maps {
+		spec.Maps[expected.Name] = &ebpf.MapSpec{
+			Name: expected.Name, Type: expected.Type, KeySize: expected.KeySize,
+			ValueSize: expected.ValueSize, MaxEntries: expected.MaxEntries, Flags: expected.Flags,
+		}
+	}
+	return spec
 }
