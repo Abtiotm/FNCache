@@ -31,6 +31,12 @@ func (dynamicObserverEndpoints) Scan(context.Context, []resolver.PodSnapshot) (r
 	return resolver.EndpointScanResult{Endpoints: map[string]resolver.Endpoint{"pod-local": {Pod: resolver.PodIdentity{Namespace: "default", Name: "local", UID: "pod-local"}, Node: resolver.NodeIdentity{Name: "node-a"}, PodIPv4: netip.MustParseAddr("10.42.0.2"), NetNSInode: 42, PeerLink: resolver.LinkIdentity{NetNSInode: 42, IfIndex: 7}, HostLink: resolver.LinkIdentity{IfIndex: 8}}}}, nil
 }
 
+type dynamicObserverSkippedEndpoints struct{}
+
+func (dynamicObserverSkippedEndpoints) Scan(context.Context, []resolver.PodSnapshot) (resolver.EndpointScanResult, error) {
+	return resolver.EndpointScanResult{Skipped: map[string]error{"pod-local": resolver.ErrEndpointNotReady}}, nil
+}
+
 type dynamicObserverTerminalEndpoints struct{}
 
 func (dynamicObserverTerminalEndpoints) Scan(_ context.Context, pods []resolver.PodSnapshot) (resolver.EndpointScanResult, error) {
@@ -108,6 +114,25 @@ func TestDynamicObserverBuildsLatestDesiredAndActualState(t *testing.T) {
 	}
 	if len(scannedLinks) != 3 || scannedLinks[0].IfIndex != 2 || scannedLinks[1].IfIndex != 7 || scannedLinks[2].IfIndex != 8 {
 		t.Fatalf("unexpected dynamic TC links: %+v", scannedLinks)
+	}
+}
+func TestDynamicObserverScanPropagatesEndpointScanSkipped(t *testing.T) {
+	cfg := dynamicTestConfig()
+	store := kube.NewSnapshotStore()
+	if err := store.UpsertNode(kube.NodeSnapshot{Identity: resolver.NodeIdentity{Name: "node-a", UID: "node-a"}}); err != nil {
+		t.Fatal(err)
+	}
+	sources := controlplane.Sources{Preflight: dynamicObserverPreflight{}, Flannel: dynamicObserverFlannel{}, Endpoints: dynamicObserverSkippedEndpoints{}, Pins: dynamicObserverPins{}, TC: dynamicObserverTC{}, Rules: dynamicObserverRules{}}
+	observer, err := NewDynamicObserver(cfg, store, sources)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual, err := observer.Scan(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reason := actual.EndpointScanSkipped["pod-local"]; reason != resolver.ErrEndpointNotReady.Error() {
+		t.Fatalf("dynamic actual scan lost endpoint skip: got=%q", reason)
 	}
 }
 

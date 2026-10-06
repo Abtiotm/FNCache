@@ -52,6 +52,21 @@ func TestBuildDesiredStateSeparatesPodsAndResolvedEndpoints(t *testing.T) {
 	}
 }
 
+func TestBuildDesiredStatePreservesEndpointScanSkipped(t *testing.T) {
+	snapshot := Snapshot{
+		Nodes: map[string]NodeSnapshot{"node-a": {Identity: resolver.NodeIdentity{Name: "node-a", UID: "node-1"}}},
+		Pods:  map[string]resolver.PodSnapshot{"pod-a": desiredPod("pod-a", "node-a", netip.MustParseAddr("10.42.0.2"))},
+	}
+	base := reconcile.DesiredState{Enabled: true, EndpointScanSkipped: map[string]string{"pod-a": "endpoint not ready"}}
+	desired, err := BuildDesiredState(snapshot, base, "node-a", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if desired.EndpointScanSkipped["pod-a"] != "endpoint not ready" {
+		t.Fatalf("endpoint scan skip was lost: %#v", desired.EndpointScanSkipped)
+	}
+}
+
 func TestBuildDesiredStateRejectsMissingNodeAndInvalidEndpoint(t *testing.T) {
 	snapshot := Snapshot{Nodes: map[string]NodeSnapshot{}, Pods: map[string]resolver.PodSnapshot{}}
 	if _, err := BuildDesiredState(snapshot, reconcile.DesiredState{}, "node-a", nil); err == nil {

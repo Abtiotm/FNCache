@@ -79,7 +79,7 @@ func TestObserverDiscoverBuildsDesiredState(t *testing.T) {
 	endpoint := testEndpoint()
 	endpoints := &fakeEndpoints{result: resolver.EndpointScanResult{
 		Endpoints: map[string]resolver.Endpoint{endpoint.Pod.UID: endpoint},
-		Skipped:   map[string]error{"pod-pending": resolver.ErrEndpointNotReady},
+		Skipped:   map[string]error{"pod-pending": resolver.ErrEndpointNotReady, "pod-unsupported": resolver.ErrUnsupported},
 	}}
 	input := testInput()
 	observer, err := NewObserver(testSources(preflight, flannelSource, endpoints), input)
@@ -99,6 +99,12 @@ func TestObserverDiscoverBuildsDesiredState(t *testing.T) {
 	}
 	if _, ok := desired.LocalEndpoints["pod-pending"]; ok {
 		t.Fatalf("skipped endpoint was included: %+v", desired.LocalEndpoints)
+	}
+	if reason := desired.EndpointScanSkipped["pod-pending"]; reason != resolver.ErrEndpointNotReady.Error() {
+		t.Fatalf("skipped endpoint was not propagated: got=%q", reason)
+	}
+	if _, ok := desired.EndpointScanSkipped["pod-unsupported"]; ok {
+		t.Fatalf("unsupported endpoint incorrectly blocked publication: %#v", desired.EndpointScanSkipped)
 	}
 	if !reflect.DeepEqual(endpoints.pods, input.Pods) {
 		t.Fatalf("unexpected endpoint inputs: got=%+v want=%+v", endpoints.pods, input.Pods)
@@ -137,6 +143,26 @@ func TestObserverScanMergesReadSideState(t *testing.T) {
 	}
 	if !reflect.DeepEqual(tc.links, input.TCLinks) {
 		t.Fatalf("unexpected TC links: got=%+v want=%+v", tc.links, input.TCLinks)
+	}
+}
+
+func TestObserverScanPropagatesEndpointScanSkipped(t *testing.T) {
+	sources := testSources(&fakePreflight{report: discovery.CapabilityReport{Supported: true}}, &fakeFlannel{config: testFlannelConfig()}, &fakeEndpoints{})
+	input := testInput()
+	input.EndpointScanSkipped = map[string]error{"pod-a": resolver.ErrEndpointNotReady, "pod-unsupported": resolver.ErrUnsupported}
+	observer, err := NewObserver(sources, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual, err := observer.Scan(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reason := actual.EndpointScanSkipped["pod-a"]; reason != resolver.ErrEndpointNotReady.Error() {
+		t.Fatalf("endpoint scan skip was not propagated to actual state: got=%q", reason)
+	}
+	if _, ok := actual.EndpointScanSkipped["pod-unsupported"]; ok {
+		t.Fatalf("unsupported endpoint incorrectly marked incomplete: %#v", actual.EndpointScanSkipped)
 	}
 }
 

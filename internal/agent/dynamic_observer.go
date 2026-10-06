@@ -90,7 +90,7 @@ func (o *DynamicObserver) buildObserver(ctx context.Context, snapshot kube.Snaps
 		PreflightRequest: discovery.PreflightRequest{Node: node.Identity, PinRoot: o.config.PinRoot, StateDir: o.config.StateDir, RuntimeURI: o.config.RuntimeEndpoint, Overlay: o.config.Overlay.Type},
 		FlannelRequest:   flannelRequest,
 		MarkerRule:       flannel.MarkerRuleSpec{Chain: o.config.Markers.Chain, Comment: o.config.Markers.Comment},
-		Pods:             localPods, TCLinks: links, BaseTCLinks: baseLinks,
+		Pods:             localPods, TCLinks: links, BaseTCLinks: baseLinks, EndpointScanSkipped: endpoints.Skipped,
 	})
 	if err != nil {
 		return nil, err
