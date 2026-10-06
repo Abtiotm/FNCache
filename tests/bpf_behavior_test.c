@@ -24,6 +24,8 @@
 #define IP_A ((uint32_t)htonl(0x0a000001U))
 #define IP_B ((uint32_t)htonl(0x0a000002U))
 #define IP_NODE ((uint32_t)htonl(0xc0a80102U))
+#define VXLAN_TEST_PORT 8472U
+#define VXLAN_TEST_VNI 1U
 
 struct env {
     struct bpf_object *obj;
@@ -75,7 +77,7 @@ static size_t plain_packet(uint8_t *p, uint8_t tos, uint8_t proto,
 }
 
 static size_t vxlan_packet(uint8_t *p, uint8_t tos, uint32_t src, uint32_t dst,
-                           uint32_t outer_dst) {
+                           uint32_t outer_dst, uint16_t udp_port, uint32_t vni) {
     size_t n = plain_packet(p + 50, tos, IPPROTO_UDP, src, dst);
     memset(p, 0, 50);
     memset(p, 0x33, 6);
@@ -87,10 +89,13 @@ static size_t vxlan_packet(uint8_t *p, uint8_t tos, uint32_t src, uint32_t dst,
     p[23] = IPPROTO_UDP;
     put32(p + 26, ip4(192, 168, 1, 1));
     put32(p + 30, outer_dst);
-    put16(p + 34, htons(4789));
-    put16(p + 36, htons(4789));
+    put16(p + 34, htons(udp_port));
+    put16(p + 36, htons(udp_port));
     put16(p + 38, htons((uint16_t)(8 + 8 + 14 + 20 + 20)));
     p[42] = 0x08;
+    p[46] = (uint8_t)(vni >> 16);
+    p[47] = (uint8_t)(vni >> 8);
+    p[48] = (uint8_t)vni;
     p[50] = 0x33;
     p[56] = 0x44;
     return n + 50;
@@ -127,17 +132,25 @@ static void close_env(struct env *e) {
     if (e->obj) bpf_object__close(e->obj);
 }
 
-static int control(struct env *e, uint32_t enabled, uint32_t flags,
-                   uint64_t heartbeat, uint64_t timeout) {
+static int control_with_vxlan(struct env *e, uint32_t enabled, uint32_t flags,
+                              uint64_t heartbeat, uint64_t timeout,
+                              uint32_t vni, uint16_t udp_port) {
     struct oncache_control_v1 value = {
         .abi_version = ONCACHE_ABI_VERSION,
         .enabled = enabled,
         .heartbeat_ns = heartbeat,
         .heartbeat_timeout_ns = timeout,
-        .flags = flags,
+        .flags = flags | ((uint32_t)udp_port << ONCACHE_CONTROL_VXLAN_UDP_SHIFT),
+        .reserved = vni,
     };
     uint32_t key = 0;
     return bpf_map_update_elem(e->control, &key, &value, BPF_ANY);
+}
+
+static int control(struct env *e, uint32_t enabled, uint32_t flags,
+                   uint64_t heartbeat, uint64_t timeout) {
+    return control_with_vxlan(e, enabled, flags, heartbeat, timeout,
+                              VXLAN_TEST_VNI, VXLAN_TEST_PORT);
 }
 
 static struct bpf_program *program(struct env *e, const char *name) {
@@ -198,7 +211,8 @@ static int control_tests(const char *path) {
 static int malformed_tests(const char *path) {
     struct env e;
     uint8_t packet[PACKET_MAX], output[PACKET_MAX];
-    size_t len = vxlan_packet(packet, 0, IP_A, IP_B, IP_NODE);
+    size_t len = vxlan_packet(packet, 0, IP_A, IP_B, IP_NODE,
+                              VXLAN_TEST_PORT, VXLAN_TEST_VNI);
     if (load_env(path, &e) || control(&e, 1, ONCACHE_CONTROL_FLAG_DEBUG_COUNTERS, 0, UINT64_MAX)) return 1;
     const char *vxlan_programs[] = {"tc_init_e", "tc_restore"};
     for (size_t p = 0; p < 2; p++) {
@@ -235,7 +249,7 @@ static int malformed_tests(const char *path) {
     return 0;
 }
 
-static int seed_hit(struct env *e, uint32_t current) {
+static int seed_hit(struct env *e, uint32_t current, uint16_t udp_port, uint32_t vni) {
     struct oncache_flow_v1 flow = {.local_addr = IP_A, .remote_addr = IP_B,
                                    .local_port = htons(1234), .remote_port = htons(4321),
                                    .protocol = IPPROTO_UDP};
@@ -243,9 +257,11 @@ static int seed_hit(struct env *e, uint32_t current) {
     struct oncache_ingress_v1 ingress = {.ifindex = IF_OUT};
     struct oncache_egress_v1 egress = {.ifindex = IF_OUT};
     struct oncache_device_v1 device = {.ipv4 = IP_NODE};
+    uint8_t outer[PACKET_MAX];
     memset(ingress.dst_mac, 0x55, sizeof(ingress.dst_mac));
     memset(ingress.src_mac, 0x66, sizeof(ingress.src_mac));
-    memset(egress.outer_header, 0x77, sizeof(egress.outer_header));
+    vxlan_packet(outer, 0, IP_A, IP_B, IP_NODE, udp_port, vni);
+    memcpy(egress.outer_header, outer, sizeof(egress.outer_header));
     memset(device.mac, 0x33, sizeof(device.mac));
     uint32_t node = IP_NODE, source = IP_A, target = IP_B;
     uint32_t local = IP_B;
@@ -265,7 +281,8 @@ static int seed_hit(struct env *e, uint32_t current) {
 static int learn_hit_tests(const char *path) {
     struct env e;
     uint8_t packet[PACKET_MAX], output[PACKET_MAX];
-    size_t len = vxlan_packet(packet, 0x0c, IP_A, IP_B, IP_NODE);
+    size_t len = vxlan_packet(packet, 0x0c, IP_A, IP_B, IP_NODE,
+                              VXLAN_TEST_PORT, VXLAN_TEST_VNI);
     if (load_env(path, &e) || control(&e, 1, 0, 0, UINT64_MAX)) return 1;
     uint32_t known_remote = IP_B, known_node = IP_NODE;
     if (bpf_map_update_elem(e.egressip, &known_remote, &known_node, BPF_ANY)) return 1;
@@ -298,7 +315,7 @@ static int learn_hit_tests(const char *path) {
         fprintf(stderr, "FAIL: fallback changed TOS\n");
         return 1;
     }
-    if (seed_hit(&e, IF_IN)) {
+    if (seed_hit(&e, IF_IN, VXLAN_TEST_PORT, VXLAN_TEST_VNI)) {
         fprintf(stderr, "FAIL: hit map seed\n");
         return 1;
     }
@@ -307,12 +324,72 @@ static int learn_hit_tests(const char *path) {
         fprintf(stderr, "FAIL: masq hit\n");
         return 1;
     }
-    len = vxlan_packet(packet, 0, IP_A, IP_B, IP_NODE);
+    len = vxlan_packet(packet, 0, IP_A, IP_B, IP_NODE,
+                       VXLAN_TEST_PORT, VXLAN_TEST_VNI);
     int restore_ret = run(program(&e, "tc_restore"), packet, len, IF_IN, output);
     if (restore_ret != TC_ACT_REDIRECT) {
         fprintf(stderr, "FAIL: restore hit ret=%d\n", restore_ret);
         return 1;
     }
+    close_env(&e);
+    return 0;
+}
+
+static int vxlan_validation_tests(const char *path) {
+    struct env e;
+    uint8_t packet[PACKET_MAX], output[PACKET_MAX];
+    uint32_t known_remote = IP_B, known_node = IP_NODE;
+    uint32_t cache_key = IP_NODE;
+
+    if (load_env(path, &e) || control(&e, 1, 0, 0, UINT64_MAX)) return 1;
+    if (bpf_map_update_elem(e.egressip, &known_remote, &known_node, BPF_ANY)) return 1;
+
+    size_t len = vxlan_packet(packet, 0, IP_A, IP_B, IP_NODE,
+                              4789, VXLAN_TEST_VNI);
+    if (run(program(&e, "tc_init_e"), packet, len, IF_IN, output) != TC_ACT_OK) {
+        fprintf(stderr, "FAIL: wrong VXLAN port changed return action\n");
+        return 1;
+    }
+    struct oncache_egress_v1 cached = {};
+    if (bpf_map_lookup_elem(e.egress, &cache_key, &cached) == 0) {
+        fprintf(stderr, "FAIL: wrong VXLAN port was learned\n");
+        return 1;
+    }
+
+    len = vxlan_packet(packet, 0, IP_A, IP_B, IP_NODE,
+                       VXLAN_TEST_PORT, 2);
+    if (run(program(&e, "tc_init_e"), packet, len, IF_IN, output) != TC_ACT_OK ||
+        bpf_map_lookup_elem(e.egress, &cache_key, &cached) == 0) {
+        fprintf(stderr, "FAIL: wrong VXLAN VNI was learned\n");
+        return 1;
+    }
+
+    if (seed_hit(&e, IF_IN, VXLAN_TEST_PORT, VXLAN_TEST_VNI)) return 1;
+    len = vxlan_packet(packet, 0, IP_A, IP_B, IP_NODE, 4789, VXLAN_TEST_VNI);
+    memcpy(output, packet, sizeof(output));
+    if (run(program(&e, "tc_restore"), packet, len, IF_IN, output) != TC_ACT_OK ||
+        memcmp(packet, output, len) != 0) {
+        fprintf(stderr, "FAIL: wrong VXLAN port was restored\n");
+        return 1;
+    }
+
+    len = vxlan_packet(packet, 0, IP_A, IP_B, IP_NODE, VXLAN_TEST_PORT, 2);
+    memcpy(output, packet, sizeof(output));
+    if (run(program(&e, "tc_restore"), packet, len, IF_IN, output) != TC_ACT_OK ||
+        memcmp(packet, output, len) != 0) {
+        fprintf(stderr, "FAIL: wrong VXLAN VNI was restored\n");
+        return 1;
+    }
+
+    if (seed_hit(&e, IF_IN, 4789, VXLAN_TEST_VNI)) return 1;
+    len = plain_packet(packet, 0, IPPROTO_UDP, IP_A, IP_B);
+    memcpy(output, packet, sizeof(output));
+    if (run(program(&e, "tc_masq"), packet, len, IF_IN, output) != TC_ACT_OK ||
+        memcmp(packet, output, len) != 0) {
+        fprintf(stderr, "FAIL: stale wrong-port cache was encapsulated\n");
+        return 1;
+    }
+
     close_env(&e);
     return 0;
 }
@@ -330,7 +407,8 @@ static int ready_race(const char *path) {
     uint32_t known_remote = IP_B, known_node = IP_NODE;
     if (bpf_map_update_elem(e.egressip, &known_remote, &known_node, BPF_ANY)) return 1;
     uint8_t egress[PACKET_MAX], ingress[PACKET_MAX];
-    size_t elen = vxlan_packet(egress, 0x0c, IP_A, IP_B, IP_NODE);
+    size_t elen = vxlan_packet(egress, 0x0c, IP_A, IP_B, IP_NODE,
+                               VXLAN_TEST_PORT, VXLAN_TEST_VNI);
     size_t ilen = plain_packet(ingress, 0x0c, IPPROTO_UDP, IP_B, IP_A);
     put16(ingress + 34, htons(4321));
     put16(ingress + 36, htons(1234));
@@ -380,7 +458,8 @@ static int fault_tests(const char *path, const char *kind) {
     struct env e;
     uint8_t packet[PACKET_MAX], output[PACKET_MAX];
     size_t len = plain_packet(packet, 0, IPPROTO_UDP, IP_A, IP_B);
-    if (load_env(path, &e) || control(&e, 1, 0, 0, UINT64_MAX) || seed_hit(&e, IF_IN)) return 1;
+    if (load_env(path, &e) || control(&e, 1, 0, 0, UINT64_MAX) ||
+        seed_hit(&e, IF_IN, VXLAN_TEST_PORT, VXLAN_TEST_VNI)) return 1;
     int ret = run(program(&e, "tc_masq"), packet, len, IF_IN, output);
     int expected = !strcmp(kind, "adjust") ? TC_ACT_OK : TC_ACT_SHOT;
     int failed = check(ret == expected, kind);
@@ -399,6 +478,8 @@ int main(int argc, char **argv) {
     if (malformed_tests(argv[1])) return 1;
     puts("learn-hit");
     if (learn_hit_tests(argv[1])) return 1;
+    puts("vxlan-validation");
+    if (vxlan_validation_tests(argv[1])) return 1;
     puts("icmp-fallback");
     if (fallback_icmp_tests(argv[1])) return 1;
     puts("ready-race");

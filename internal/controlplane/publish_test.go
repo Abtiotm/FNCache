@@ -40,12 +40,15 @@ type fakeControlPublisher struct {
 	events                         *[]string
 	generation, heartbeat, timeout uint64
 	flags                          uint32
+	vxlanVNI                       uint32
+	vxlanUDPPort                   uint16
 	err                            error
 }
 
-func (f *fakeControlPublisher) Publish(_ context.Context, generation, heartbeat, timeout uint64, flags uint32) error {
+func (f *fakeControlPublisher) Publish(_ context.Context, generation, heartbeat, timeout uint64, flags uint32, vxlanVNI uint32, vxlanUDPPort uint16) error {
 	*f.events = append(*f.events, "publish")
 	f.generation, f.heartbeat, f.timeout, f.flags = generation, heartbeat, timeout, flags
+	f.vxlanVNI, f.vxlanUDPPort = vxlanVNI, vxlanUDPPort
 	return f.err
 }
 
@@ -68,6 +71,26 @@ func TestVerifyStateRequiresCompleteVerifiedObjects(t *testing.T) {
 	delete(actual.Programs, "tc_restore")
 	if err := VerifyState(desired, actual); err == nil {
 		t.Fatal("missing program was accepted")
+	}
+}
+
+func TestVerifyStateRequiresVXLANConfig(t *testing.T) {
+	desired := publishTestDesired()
+	actual := publishTestActual(desired)
+	for _, test := range []struct {
+		name   string
+		update func(*reconcile.DesiredState)
+	}{
+		{name: "zero VNI", update: func(state *reconcile.DesiredState) { state.Datapath.VXLANVNI = 0 }},
+		{name: "zero UDP port", update: func(state *reconcile.DesiredState) { state.Datapath.VXLANUDPPort = 0 }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			invalid := desired
+			test.update(&invalid)
+			if err := VerifyState(invalid, actual); err == nil {
+				t.Fatal("invalid VXLAN configuration was accepted")
+			}
+		})
 	}
 }
 
@@ -94,8 +117,9 @@ func TestPublisherCommitsOwnershipBeforePublishing(t *testing.T) {
 		store.state.ABI != reconcile.BPFABIVersion || store.state.LastCommittedAt.Unix() != 42 || len(store.state.Endpoints) != 1 {
 		t.Fatalf("unexpected ownership state: %+v", store.state)
 	}
-	if control.generation != 7 || control.heartbeat != 100 || control.timeout != 500 || control.flags != 3 {
-		t.Fatalf("unexpected control publish: generation=%d heartbeat=%d timeout=%d flags=%d", control.generation, control.heartbeat, control.timeout, control.flags)
+	if control.generation != 7 || control.heartbeat != 100 || control.timeout != 500 || control.flags != 3 ||
+		control.vxlanVNI != 1 || control.vxlanUDPPort != 8472 {
+		t.Fatalf("unexpected control publish: generation=%d heartbeat=%d timeout=%d flags=%d vni=%d port=%d", control.generation, control.heartbeat, control.timeout, control.flags, control.vxlanVNI, control.vxlanUDPPort)
 	}
 }
 
@@ -196,7 +220,8 @@ func publishTestDesired() reconcile.DesiredState {
 	}
 	return reconcile.DesiredState{
 		Generation: 7, Enabled: true, LocalEndpoints: map[string]resolver.Endpoint{endpoint.Pod.UID: endpoint},
-		Flannel: reconcile.FlannelState{UnderlayLink: resolver.LinkIdentity{IfIndex: 2, IfName: "eth0", MAC: []byte{2, 0, 0, 0, 0, 1}}, UnderlayIPv4: netip.MustParseAddr("192.0.2.10")},
+		Datapath: reconcile.DatapathSpec{VXLANVNI: 1, VXLANUDPPort: 8472},
+		Flannel:  reconcile.FlannelState{UnderlayLink: resolver.LinkIdentity{IfIndex: 2, IfName: "eth0", MAC: []byte{2, 0, 0, 0, 0, 1}}, UnderlayIPv4: netip.MustParseAddr("192.0.2.10")},
 	}
 }
 

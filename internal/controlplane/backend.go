@@ -270,5 +270,6 @@ func (b *FirstPassBackend) Publish(ctx context.Context, desired reconcile.Desire
 		return err
 	}
 	config := b.publisher.config
-	return b.publisher.control.Publish(ctx, desired.Generation, config.HeartbeatNS, config.HeartbeatTimeoutNS, config.Flags)
+	return b.publisher.control.Publish(ctx, desired.Generation, config.HeartbeatNS, config.HeartbeatTimeoutNS, config.Flags,
+		desired.Datapath.VXLANVNI, desired.Datapath.VXLANUDPPort)
 }

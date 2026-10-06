@@ -9,6 +9,10 @@
 #define ONCACHE_PROGRAM_PIN_ROOT ONCACHE_PIN_ROOT "/programs"
 #define ONCACHE_CONTROL_FLAG_FORCE_PASS (1U << 0)
 #define ONCACHE_CONTROL_FLAG_DEBUG_COUNTERS (1U << 1)
+/* The lower control flags remain available to the existing control plane. */
+#define ONCACHE_CONTROL_VXLAN_UDP_SHIFT 16U
+#define ONCACHE_CONTROL_VXLAN_UDP_MASK 0xffff0000U
+#define ONCACHE_CONTROL_USER_FLAGS_MASK 0x0000ffffU
 
 struct oncache_flow_v1 {
     __be32 local_addr;
@@ -47,6 +51,7 @@ struct oncache_control_v1 {
     __u64 heartbeat_ns;
     __u64 heartbeat_timeout_ns;
     __u32 flags;
+    /* ABI-v1 reserved space carries the configured 24-bit VXLAN VNI. */
     __u32 reserved;
 };
 

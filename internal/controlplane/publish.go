@@ -16,7 +16,7 @@ type OwnershipCommitter interface {
 }
 
 type ControlPublisher interface {
-	Publish(context.Context, uint64, uint64, uint64, uint32) error
+	Publish(context.Context, uint64, uint64, uint64, uint32, uint32, uint16) error
 }
 
 type PublishGuard func(context.Context) error
@@ -85,7 +85,8 @@ func (p *Publisher) CommitAndPublish(ctx context.Context, desired reconcile.Desi
 	if err := p.checkPublishGuard(ctx); err != nil {
 		return err
 	}
-	if err := p.control.Publish(ctx, desired.Generation, p.config.HeartbeatNS, p.config.HeartbeatTimeoutNS, p.config.Flags); err != nil {
+	if err := p.control.Publish(ctx, desired.Generation, p.config.HeartbeatNS, p.config.HeartbeatTimeoutNS, p.config.Flags,
+		desired.Datapath.VXLANVNI, desired.Datapath.VXLANUDPPort); err != nil {
 		return fmt.Errorf("publish generation %d: %w", desired.Generation, err)
 	}
 	return nil
@@ -94,6 +95,9 @@ func (p *Publisher) CommitAndPublish(ctx context.Context, desired reconcile.Desi
 func VerifyState(desired reconcile.DesiredState, actual reconcile.ActualState) error {
 	if !desired.Enabled {
 		return fmt.Errorf("cannot publish disabled desired state")
+	}
+	if err := validateDatapathConfig(desired); err != nil {
+		return err
 	}
 	if !actual.Control.Verified || actual.Control.Enabled {
 		return fmt.Errorf("cannot publish while actual control Map is enabled or unverified")
@@ -134,6 +138,16 @@ func VerifyState(desired reconcile.DesiredState, actual reconcile.ActualState) e
 		if err := verifyAttachment(actual.Attachments, endpoint.HostLink, datapath.HookIngress, "tc_masq", programs["tc_masq"]); err != nil {
 			return fmt.Errorf("endpoint %s: %w", uid, err)
 		}
+	}
+	return nil
+}
+
+func validateDatapathConfig(desired reconcile.DesiredState) error {
+	if desired.Datapath.VXLANVNI == 0 || desired.Datapath.VXLANVNI > 0xffffff {
+		return fmt.Errorf("invalid desired VXLAN VNI: %d", desired.Datapath.VXLANVNI)
+	}
+	if desired.Datapath.VXLANUDPPort == 0 {
+		return fmt.Errorf("invalid desired VXLAN UDP port: %d", desired.Datapath.VXLANUDPPort)
 	}
 	return nil
 }

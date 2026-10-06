@@ -378,8 +378,8 @@ func (c *integrationControl) Disable(ctx context.Context) error {
 	return c.writer.Disable(ctx)
 }
 
-func (c *integrationControl) Publish(ctx context.Context, generation, heartbeatNS, heartbeatTimeoutNS uint64, flags uint32) error {
-	return c.writer.Publish(ctx, generation, heartbeatNS, heartbeatTimeoutNS, flags)
+func (c *integrationControl) Publish(ctx context.Context, generation, heartbeatNS, heartbeatTimeoutNS uint64, flags uint32, vxlanVNI uint32, vxlanUDPPort uint16) error {
+	return c.writer.Publish(ctx, generation, heartbeatNS, heartbeatTimeoutNS, flags, vxlanVNI, vxlanUDPPort)
 }
 
 func newFirstPassRuntime(t *testing.T, elf, pinRoot, statePath string, desired reconcile.DesiredState, link resolver.LinkIdentity) *firstPassRuntime {
@@ -537,7 +537,11 @@ func (l *netNSLab) withNetNS(fn func(context.Context) error) error {
 }
 
 func baseDesired(link resolver.LinkIdentity) reconcile.DesiredState {
-	return reconcile.DesiredState{Enabled: true, Flannel: reconcile.FlannelState{UnderlayLink: link, UnderlayIPv4: netip.MustParseAddr("192.0.2.2")}}
+	return reconcile.DesiredState{
+		Enabled:  true,
+		Datapath: reconcile.DatapathSpec{VXLANVNI: 1, VXLANUDPPort: 8472},
+		Flannel:  reconcile.FlannelState{UnderlayLink: link, UnderlayIPv4: netip.MustParseAddr("192.0.2.2"), VNI: 1, UDPPort: 8472},
+	}
 }
 
 func linkIdentity(name string, netnsInode uint64, netnsPath string) (resolver.LinkIdentity, error) {

@@ -198,12 +198,33 @@ func TestControlWriterPublishEnablesNewGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := writer.Publish(context.Background(), 42, 100, 500, 3); err != nil {
+	if err := writer.Publish(context.Background(), 42, 100, 500, 3, 1, 8472); err != nil {
 		t.Fatal(err)
 	}
 	if fake.updated.Enabled != 1 || fake.updated.Generation != 42 || fake.updated.HeartbeatNS != 100 ||
-		fake.updated.HeartbeatTimeoutNS != 500 || fake.updated.Flags != 3 || fake.updated.Reserved != 0 {
+		fake.updated.HeartbeatTimeoutNS != 500 || fake.updated.Flags != 3|(uint32(8472)<<controlVXLANUDPShift) || fake.updated.Reserved != 1 {
 		t.Fatalf("unexpected published control state: %+v", fake.updated)
+	}
+}
+
+func TestControlWriterPublishRejectsInvalidVXLANConfig(t *testing.T) {
+	writer, _ := newControlWriter(t.TempDir(), func(string) (controlMap, error) {
+		return &fakeControlMap{value: ControlV1{ABIVersion: 1}}, nil
+	})
+	for _, test := range []struct {
+		name string
+		vni  uint32
+		port uint16
+	}{
+		{name: "zero VNI", vni: 0, port: 8472},
+		{name: "too large VNI", vni: 0x1000000, port: 8472},
+		{name: "zero UDP port", vni: 1, port: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := writer.Publish(context.Background(), 42, 100, 500, 3, test.vni, test.port); err == nil {
+				t.Fatal("invalid VXLAN configuration was accepted")
+			}
+		})
 	}
 }
 
@@ -267,7 +288,7 @@ func TestControlWriterPublishRejectsInvalidHeartbeat(t *testing.T) {
 		called = true
 		return &fakeControlMap{value: ControlV1{ABIVersion: 1}}, nil
 	})
-	if err := writer.Publish(context.Background(), 1, 0, 500, 0); err == nil || called {
+	if err := writer.Publish(context.Background(), 1, 0, 500, 0, 1, 8472); err == nil || called {
 		t.Fatalf("invalid heartbeat was accepted: err=%v called=%v", err, called)
 	}
 }

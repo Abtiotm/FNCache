@@ -90,7 +90,7 @@ type dynamicRuntimePublisherControl struct {
 	published *atomic.Bool
 }
 
-func (c dynamicRuntimePublisherControl) Publish(context.Context, uint64, uint64, uint64, uint32) error {
+func (c dynamicRuntimePublisherControl) Publish(context.Context, uint64, uint64, uint64, uint32, uint32, uint16) error {
 	if c.published != nil {
 		c.published.Store(true)
 	}
