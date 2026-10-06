@@ -39,6 +39,9 @@ func (s *EndpointScanner) Scan(ctx context.Context, pods []PodSnapshot) (Endpoin
 			return EndpointScanResult{}, fmt.Errorf("duplicate Pod UID with different snapshots: %s", uid)
 		}
 		seen[uid] = pod
+		if pod.Deleting || pod.HostNetwork {
+			continue
+		}
 		endpoint, err := s.resolver.Resolve(ctx, pod)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {

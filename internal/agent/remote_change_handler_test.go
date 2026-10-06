@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"testing"
 
+	"github.com/cat-cc-Lcos/FNCache/internal/controlplane"
 	"github.com/cat-cc-Lcos/FNCache/internal/discovery"
 	"github.com/cat-cc-Lcos/FNCache/internal/kube"
 	"github.com/cat-cc-Lcos/FNCache/internal/reconcile"
@@ -20,6 +21,20 @@ type remoteMaps struct {
 	err            error
 	baseErr        error
 	deviceMapErr   error
+}
+
+type remoteTestOwnership struct{ commits int }
+
+func (s *remoteTestOwnership) Commit(context.Context, reconcile.OwnershipState) error {
+	s.commits++
+	return nil
+}
+
+type remoteTestControlPublisher struct{ publishes int }
+
+func (p *remoteTestControlPublisher) Publish(context.Context, uint64, uint64, uint64, uint32) error {
+	p.publishes++
+	return nil
 }
 
 func (m *remoteMaps) Clear(_ context.Context, name string) (int, error) {
@@ -59,7 +74,11 @@ func remoteChangeStore(t *testing.T) *kube.SnapshotStore {
 
 func newRemoteChangeHandler(t *testing.T, store *kube.SnapshotStore, maps *remoteMaps, events *[]string, publisher *localHandlerPublisher) *RemoteChangeHandler {
 	t.Helper()
-	base := reconcile.DesiredState{Enabled: true, Capability: discovery.CapabilityReport{Supported: true}}
+	return newRemoteChangeHandlerWithDesired(t, store, maps, events, publisher, reconcile.DesiredState{Enabled: true, Capability: discovery.CapabilityReport{Supported: true}})
+}
+
+func newRemoteChangeHandlerWithDesired(t *testing.T, store *kube.SnapshotStore, maps *remoteMaps, events *[]string, publisher *localHandlerPublisher, base reconcile.DesiredState) *RemoteChangeHandler {
+	t.Helper()
 	control := &localHandlerControl{events: events}
 	scanner := &localHandlerScanner{events: events}
 	handler, err := NewRemoteChangeHandler(RemoteChangeHandlerConfig{Store: store, LocalNode: "node-a", Desired: &localHandlerDesired{desired: base, events: events}, Maps: maps, Base: maps, DeviceMap: maps, Generation: testLocalGeneration(control, scanner, publisher)})
@@ -67,6 +86,43 @@ func newRemoteChangeHandler(t *testing.T, store *kube.SnapshotStore, maps *remot
 		t.Fatal(err)
 	}
 	return handler
+}
+
+func TestRemoteChangeHandlerRetriesWhenEndpointScanIsIncomplete(t *testing.T) {
+	events := []string{}
+	maps := &remoteMaps{}
+	ownership := &remoteTestOwnership{}
+	controlPublisher := &remoteTestControlPublisher{}
+	publisher, err := controlplane.NewPublisher(ownership, controlPublisher, controlplane.PublishConfig{
+		InstallationID: "install-a", NodeUID: "node-a", ELFBuildID: "build-a", HeartbeatNS: 1, HeartbeatTimeoutNS: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	control := &localHandlerControl{events: &events}
+	scanner := &localHandlerScanner{events: &events}
+	generation, err := controlplane.NewGenerationTransaction(control, scanner, publisher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := reconcile.DesiredState{
+		Generation: 1, Enabled: true, Capability: discovery.CapabilityReport{Supported: true},
+		EndpointScanSkipped: map[string]string{"pod-local": resolver.ErrEndpointNotReady.Error()},
+	}
+	handler, err := NewRemoteChangeHandler(RemoteChangeHandlerConfig{
+		Store: remoteChangeStore(t), LocalNode: "node-a", Desired: &localHandlerDesired{desired: base, events: &events}, Maps: maps, Generation: generation,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = handler.Handle(context.Background(), reconcile.ReconcileKey{Kind: reconcile.ReconcileRemoteEndpoint, UID: "pod-remote"})
+	var classified *reconcile.ClassifiedError
+	if !errors.As(err, &classified) || classified.Class() != reconcile.ErrorRetryable || classified.ReasonCode() != reconcile.ReasonEndpointNotReady {
+		t.Fatalf("incomplete endpoint scan was not retried: err=%v", err)
+	}
+	if len(events) != 2 || events[0] != "desired" || events[1] != "disable" || len(maps.calls) != 0 || maps.remoteMappings != 0 || ownership.commits != 0 || controlPublisher.publishes != 0 {
+		t.Fatalf("incomplete endpoint scan reached mutation: events=%v maps=%v remote=%d commits=%d publishes=%d", events, maps.calls, maps.remoteMappings, ownership.commits, controlPublisher.publishes)
+	}
 }
 
 func TestRemoteChangeHandlerInvalidatesAndPublishesLatestMapping(t *testing.T) {
