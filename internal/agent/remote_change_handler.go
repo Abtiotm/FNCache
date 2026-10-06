@@ -17,11 +17,17 @@ type remoteMapEnsurer interface {
 	EnsureRemoteMappings(context.Context, reconcile.DesiredState, reconcile.ActualState, bool) (bool, error)
 }
 
+type localDeviceMapEnsurer interface {
+	EnsureDeviceMap(context.Context, reconcile.DesiredState, reconcile.ActualState, bool) (bool, error)
+}
+
 type RemoteChangeHandlerConfig struct {
 	Store      *kube.SnapshotStore
 	LocalNode  string
 	Desired    localDesiredSource
 	Maps       remoteMapInvalidator
+	Base       localBaseEnsurer
+	DeviceMap  localDeviceMapEnsurer
 	Generation localGenerationTransaction
 }
 
@@ -62,6 +68,17 @@ func (h *RemoteChangeHandler) Handle(ctx context.Context, key reconcile.Reconcil
 		return fmt.Errorf("build desired state after remote change: %w", err)
 	}
 	if err := h.config.Generation.Execute(ctx, desired, func(ctx context.Context, desired reconcile.DesiredState, actual reconcile.ActualState) error {
+		if key.Kind == reconcile.ReconcileGlobal {
+			if h.config.Base == nil || h.config.DeviceMap == nil {
+				return fmt.Errorf("global change handler dependencies are required")
+			}
+			if _, err := h.config.Base.EnsureBase(ctx, desired, actual); err != nil {
+				return fmt.Errorf("ensure base datapath for global change: %w", err)
+			}
+			if _, err := h.config.DeviceMap.EnsureDeviceMap(ctx, desired, actual, true); err != nil {
+				return fmt.Errorf("ensure devmap for global change: %w", err)
+			}
+		}
 		for _, name := range []string{"egressip_cache", "egress_cache", "policy_cache"} {
 			if _, err := h.config.Maps.Clear(ctx, name); err != nil {
 				return fmt.Errorf("clear %s for remote change: %w", name, err)

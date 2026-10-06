@@ -45,6 +45,7 @@ type datapathComponents struct {
 	base             localBaseEnsurer
 	endpoint         localEndpointEnsurer
 	maps             localMapEnsurer
+	deviceMap        localDeviceMapEnsurer
 	publisher        *controlplane.Publisher
 }
 
@@ -176,7 +177,7 @@ func newDatapathComponents(ctx context.Context, config datapathComponentConfig) 
 		cri: cri, endpointResolver: endpointResolver, endpointScanner: endpointScanner, pins: pins, tcScanner: tcScanner, tc: tc, mapWriter: &endpointMapWriterAdapter{writer: mapWriter, maps: maps}, ownership: store,
 		sources: controlplane.Sources{Preflight: discovery.NewPreflight(discovery.NewLinuxProbe("/")), Flannel: flannel.NewDiscovery(nil), Endpoints: endpointScanner, Pins: pins, TC: tcScanner, Rules: flannel.NewRuleScanner(nil)},
 		control: &runtimeControl{pinRoot: config.PinRoot, writer: controlWriter}, collection: collection, marker: marker,
-		base: base, endpoint: endpoint, maps: maps, publisher: publisher,
+		base: base, endpoint: endpoint, maps: maps, deviceMap: maps, publisher: publisher,
 	}
 	ok = true
 	return components, nil
