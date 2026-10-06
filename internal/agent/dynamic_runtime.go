@@ -448,7 +448,7 @@ func (r *DynamicRuntime) initializeDatapath(ctx context.Context) error {
 		_ = components.Close()
 		return err
 	}
-	remote, err := NewRemoteChangeHandler(RemoteChangeHandlerConfig{Store: r.store, LocalNode: r.config.NodeName, Desired: observer, Maps: components.mapWriter, Generation: generationTransaction})
+	remote, err := NewRemoteChangeHandler(RemoteChangeHandlerConfig{Store: r.store, LocalNode: r.config.NodeName, Desired: observer, Maps: components.mapWriter, Base: components.base, DeviceMap: components.deviceMap, Generation: generationTransaction})
 	if err != nil {
 		_ = components.Close()
 		return err
