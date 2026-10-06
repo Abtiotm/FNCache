@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/cat-cc-Lcos/FNCache/internal/controlplane"
 	"github.com/cat-cc-Lcos/FNCache/internal/reconcile"
 )
 
@@ -30,12 +31,29 @@ func (s *RuntimeScanAdapter) Light(ctx context.Context) ScanResult {
 
 func (s *RuntimeScanAdapter) Incremental(ctx context.Context) ScanResult {
 	actual, err := s.observer.IncrementalScan(ctx)
-	return classifyScan(ScanIncremental, actual, err)
+	return s.classifyRuntimeScan(ctx, ScanIncremental, actual, err)
 }
 
 func (s *RuntimeScanAdapter) Full(ctx context.Context) ScanResult {
 	actual, err := s.observer.Scan(ctx)
-	return classifyScan(ScanFull, actual, err)
+	return s.classifyRuntimeScan(ctx, ScanFull, actual, err)
+}
+
+func (s *RuntimeScanAdapter) classifyRuntimeScan(ctx context.Context, level ScanLevel, actual reconcile.ActualState, err error) ScanResult {
+	result := classifyScan(level, actual, err)
+	if result.Critical || err != nil || !actual.Control.Verified {
+		return result
+	}
+	desired, err := s.observer.Desired(ctx)
+	if err != nil {
+		return failedScan(level, err)
+	}
+	verification := actual
+	verification.Control.Enabled = false
+	if err := controlplane.VerifyState(desired, verification); err != nil {
+		return ScanResult{Level: level, Critical: true, InvalidateEpoch: true, Reason: "DATAPATH_STATE_INCOMPLETE", Err: err}
+	}
+	return result
 }
 
 func failedScan(level ScanLevel, err error) ScanResult {

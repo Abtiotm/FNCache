@@ -297,7 +297,7 @@ func (o *integrationObserver) Scan(ctx context.Context) (reconcile.ActualState, 
 	}
 	actual.Attachments = append(actual.Attachments, tc.Attachments...)
 	actual.Conflicts = append(actual.Conflicts, tc.Conflicts...)
-	actual.FlannelRule = reconcile.RuleState{Present: true, Identity: "m2-integration-marker", Fingerprint: "m2-integration"}
+	actual.FlannelRule = reconcile.RuleState{Present: true, JumpsPresent: true, Identity: "m2-integration-marker", Fingerprint: "m2-integration"}
 	return actual, nil
 }
 
@@ -360,6 +360,10 @@ func collectionReady(actual reconcile.ActualState) bool {
 type staticMarkerEnsurer struct{}
 
 func (staticMarkerEnsurer) EnsureMarker(context.Context, reconcile.DesiredState) (bool, error) {
+	return false, nil
+}
+
+func (staticMarkerEnsurer) RepairOwnedMarker(context.Context, reconcile.OwnedRule) (bool, error) {
 	return false, nil
 }
 

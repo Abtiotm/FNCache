@@ -46,28 +46,48 @@ func (e *MapEnsurer) EnsureEndpointMaps(ctx context.Context, desired reconcile.D
 	if err := validateMapState(actual, "ingress_cache", 4, 16, 1024); err != nil {
 		return false, err
 	}
-	if err := validateMapState(actual, "devmap", 4, 12, 8); err != nil {
-		return false, err
-	}
 	if len(endpoint.PeerLink.MAC) != 6 || len(endpoint.HostLink.MAC) != 6 {
 		return false, fmt.Errorf("endpoint MAC identity must contain 6 bytes")
 	}
-	if desired.Flannel.UnderlayLink.IfIndex <= 0 || len(desired.Flannel.UnderlayLink.MAC) != 6 ||
-		!desired.Flannel.UnderlayIPv4.IsValid() || !desired.Flannel.UnderlayIPv4.Is4() {
-		return false, fmt.Errorf("underlay device identity is incomplete")
+	if err := validateDeviceMapInput(desired, actual); err != nil {
+		return false, err
 	}
 
 	ingressKey, ingressValue := encodeIngressEntry(endpoint)
-	devKey, devValue := encodeDeviceEntry(desired.Flannel.UnderlayLink, desired.Flannel.UnderlayIPv4)
 	changed, err := e.store.Ensure(ctx, "ingress_cache", ingressKey, ingressValue)
 	if err != nil {
 		return changed, fmt.Errorf("ensure ingress_cache: %w", err)
 	}
-	deviceChanged, err := e.store.Ensure(ctx, "devmap", devKey, devValue)
+	deviceChanged, err := e.ensureDeviceMap(ctx, desired)
 	if err != nil {
 		return changed || deviceChanged, fmt.Errorf("ensure devmap: %w", err)
 	}
 	return changed || deviceChanged, nil
+}
+
+func (e *MapEnsurer) EnsureDeviceMap(ctx context.Context, desired reconcile.DesiredState, actual reconcile.ActualState, fastPathDisabled bool) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if !desired.Enabled {
+		return false, nil
+	}
+	if !fastPathDisabled || !actual.Control.Verified || actual.Control.Enabled {
+		return false, fmt.Errorf("refusing Map update while fast path is enabled or unverified")
+	}
+	if err := validateDeviceMapInput(desired, actual); err != nil {
+		return false, err
+	}
+	return e.ensureDeviceMap(ctx, desired)
+}
+
+func (e *MapEnsurer) ensureDeviceMap(ctx context.Context, desired reconcile.DesiredState) (bool, error) {
+	devKey, devValue := encodeDeviceEntry(desired.Flannel.UnderlayLink, desired.Flannel.UnderlayIPv4)
+	changed, err := e.store.Ensure(ctx, "devmap", devKey, devValue)
+	if err != nil {
+		return changed, fmt.Errorf("ensure devmap: %w", err)
+	}
+	return changed, nil
 }
 
 func (e *MapEnsurer) EnsureRemoteMappings(ctx context.Context, desired reconcile.DesiredState, actual reconcile.ActualState, fastPathDisabled bool) (bool, error) {
@@ -112,6 +132,17 @@ func validateMapState(actual reconcile.ActualState, name string, keySize, valueS
 	}
 	if state.KeySize != keySize || state.ValueSize != valueSize || state.MaxEntries != maxEntries {
 		return fmt.Errorf("Map schema mismatch for %s: got key=%d value=%d max=%d want key=%d value=%d max=%d", name, state.KeySize, state.ValueSize, state.MaxEntries, keySize, valueSize, maxEntries)
+	}
+	return nil
+}
+
+func validateDeviceMapInput(desired reconcile.DesiredState, actual reconcile.ActualState) error {
+	if err := validateMapState(actual, "devmap", 4, 12, 8); err != nil {
+		return err
+	}
+	if desired.Flannel.UnderlayLink.IfIndex <= 0 || len(desired.Flannel.UnderlayLink.MAC) != 6 ||
+		!desired.Flannel.UnderlayIPv4.IsValid() || !desired.Flannel.UnderlayIPv4.Is4() {
+		return fmt.Errorf("underlay device identity is incomplete")
 	}
 	return nil
 }

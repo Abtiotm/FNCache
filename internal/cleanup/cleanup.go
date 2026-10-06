@@ -223,9 +223,9 @@ func netNSPath(inode uint64) (string, bool) {
 
 func BuildPlan(state reconcile.OwnershipState, actual reconcile.ActualState, marker reconcile.RuleState, markerIdentity string, unresolvedNetNS []reconcile.AttachmentState) Plan {
 	plan := Plan{}
-	for _, attachment := range unresolvedNetNS {
-		plan.Blocked = append(plan.Blocked, Action{Kind: ActionTC, Identity: attachmentIdentity(attachment), Evidence: []string{"netns path is not persisted and could not be resolved"}})
-	}
+	// An unresolved netns has already disappeared, so there is no live TC
+	// object to remove. Keep it out of Actions and continue cleaning objects
+	// whose ownership can still be verified.
 	for _, owned := range state.Attachments {
 		if hasAttachment(unresolvedNetNS, owned) || state.Programs[owned.Program].ID != owned.ProgramID {
 			continue

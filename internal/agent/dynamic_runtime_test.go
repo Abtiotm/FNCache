@@ -30,6 +30,9 @@ func (dynamicRuntimeMaps) Clear(context.Context, string) (int, error)           
 func (dynamicRuntimeMaps) EnsureRemoteMappings(context.Context, reconcile.DesiredState, reconcile.ActualState, bool) (bool, error) {
 	return true, nil
 }
+func (dynamicRuntimeMaps) EnsureDeviceMap(context.Context, reconcile.DesiredState, reconcile.ActualState, bool) (bool, error) {
+	return true, nil
+}
 
 type dynamicRuntimeTC struct{}
 
@@ -156,7 +159,7 @@ func dynamicRuntimeComponents(t *testing.T, sources controlplane.Sources, contro
 		cri: &fakeCloser{}, endpointResolver: &localHandlerResolver{endpoint: handlerEndpoint("unused"), events: events}, sources: sources,
 		tc: dynamicRuntimeTC{}, mapWriter: dynamicRuntimeMaps{}, ownership: &deleteOwnership{state: reconcile.OwnershipState{SchemaVersion: 1, InstallationID: "install", NodeUID: "node-a"}},
 		control: control, collection: dynamicRuntimeEnsurers{}, marker: dynamicRuntimeEnsurers{}, base: dynamicRuntimeEnsurers{},
-		endpoint: &localHandlerEndpoint{events: events}, maps: &localHandlerMaps{events: events}, publisher: publisher,
+		endpoint: &localHandlerEndpoint{events: events}, maps: &localHandlerMaps{events: events}, deviceMap: dynamicRuntimeMaps{}, publisher: publisher,
 	}
 }
 

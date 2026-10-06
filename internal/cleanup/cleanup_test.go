@@ -78,11 +78,11 @@ func TestCleanupPlanDryRunHasNoSideEffects(t *testing.T) {
 	}
 }
 
-func TestBuildPlanBlocksUnresolvedNetNSAttachment(t *testing.T) {
+func TestBuildPlanSkipsUnresolvedNetNSAttachment(t *testing.T) {
 	attachment := reconcile.AttachmentState{Link: resolver.LinkIdentity{NetNSInode: 42, IfIndex: 7}, Program: "tc_init_in", ProgramID: 11, Hook: string(datapath.HookIngress), Priority: datapath.FixedTCPriority, Handle: 0x201}
 	plan := BuildPlan(reconcile.OwnershipState{}, reconcile.ActualState{}, reconcile.RuleState{}, "ONCACHE/oncache:dev", []reconcile.AttachmentState{attachment})
-	if len(plan.Blocked) != 1 || plan.Blocked[0].Kind != ActionTC {
-		t.Fatalf("unresolved netns attachment was not blocked: %+v", plan.Blocked)
+	if len(plan.Blocked) != 0 || len(plan.Actions) != 1 || plan.Actions[0].Kind != ActionState {
+		t.Fatalf("unresolved netns attachment was not skipped safely: %+v", plan)
 	}
 }
 
