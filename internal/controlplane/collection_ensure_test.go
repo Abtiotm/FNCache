@@ -2,7 +2,12 @@ package controlplane
 
 import (
 	"context"
+	"crypto/sha1"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
+	"hash"
 	"io"
 	"os"
 	"path/filepath"
@@ -23,29 +28,14 @@ func (h *fakeCollectionHandle) Unpin() error { h.unpinCalls++; return nil }
 func (h *fakeCollectionHandle) Close() error { h.closeCalls++; return nil }
 
 func TestCollectionEnsurerSkipsReadyCollection(t *testing.T) {
-	elf := filepath.Join(t.TempDir(), "datapath.o")
-	if err := os.WriteFile(elf, []byte("elf"), 0600); err != nil {
-		t.Fatal(err)
-	}
 	spec := testCollectionSpec()
-	loaded := false
-	ensurer, err := newCollectionEnsurer(elf, "/sys/fs/bpf/oncache/v1", func(string) (collectionOps, error) {
-		return collectionOps{
-			loadCollection: func(io.ReaderAt, datapath.CollectionSchema) (*ebpf.CollectionSpec, error) {
-				return spec, nil
-			},
-			loadAndPin: func(*ebpf.CollectionSpec, datapath.CollectionSchema) (collectionHandle, error) {
-				loaded = true
-				return nil, errors.New("ready collection should not be loaded")
-			},
-		}, nil
-	}, func(context.Context, string) error { return nil })
-	if err != nil {
-		t.Fatal(err)
-	}
-	if changed, err := ensurer.EnsureCollection(context.Background(), reconcile.DesiredState{Enabled: true}, readyCollectionState(t, spec)); err != nil || changed || loaded {
-		t.Fatalf("ready collection was not a no-op: changed=%v err=%v loaded=%v", changed, err, loaded)
-	}
+	assertCollectionReadyNoop(t, spec, readyCollectionState(t, spec))
+}
+
+func TestCollectionEnsurerAcceptsSHA256ProgramTags(t *testing.T) {
+	spec := testCollectionSpec()
+	actual := readyCollectionStateWithHash(t, spec, sha256.New)
+	assertCollectionReadyNoop(t, spec, actual)
 }
 
 func TestCollectionEnsurerDoesNotSkipStaleProgram(t *testing.T) {
@@ -133,22 +123,58 @@ func TestCollectionEnsurerRollsBackWhenControlInitializationFails(t *testing.T) 
 	}
 }
 
+func assertCollectionReadyNoop(t *testing.T, spec *ebpf.CollectionSpec, actual reconcile.ActualState) {
+	t.Helper()
+	elf := filepath.Join(t.TempDir(), "datapath.o")
+	if err := os.WriteFile(elf, []byte("elf"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	loaded := false
+	ensurer, err := newCollectionEnsurer(elf, "/sys/fs/bpf/oncache/v1", func(string) (collectionOps, error) {
+		return collectionOps{
+			loadCollection: func(io.ReaderAt, datapath.CollectionSchema) (*ebpf.CollectionSpec, error) {
+				return spec, nil
+			},
+			loadAndPin: func(*ebpf.CollectionSpec, datapath.CollectionSchema) (collectionHandle, error) {
+				loaded = true
+				return nil, errors.New("ready collection should not be loaded")
+			},
+		}, nil
+	}, func(context.Context, string) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := ensurer.EnsureCollection(context.Background(), reconcile.DesiredState{Enabled: true}, actual); err != nil || changed || loaded {
+		t.Fatalf("ready collection was not a no-op: changed=%v err=%v loaded=%v", changed, err, loaded)
+	}
+}
+
 func readyCollectionState(t *testing.T, spec *ebpf.CollectionSpec) reconcile.ActualState {
+	return readyCollectionStateWithHash(t, spec, sha1.New)
+}
+
+func readyCollectionStateWithHash(t *testing.T, spec *ebpf.CollectionSpec, digest func() hash.Hash) reconcile.ActualState {
 	t.Helper()
 	schema := datapath.V1Schema()
 	actual := reconcile.ActualState{Programs: make(map[string]reconcile.ProgramState), Maps: make(map[string]reconcile.MapState)}
 	for _, name := range schema.Programs {
 		program := spec.Programs[name]
-		tag, err := program.Tag()
-		if err != nil {
-			t.Fatalf("calculate tag for %s: %v", name, err)
-		}
+		tag := instructionTag(t, program.Instructions, digest)
 		actual.Programs[name] = reconcile.ProgramState{ID: 1, Name: name, Tag: tag}
 	}
 	for _, expected := range schema.Maps {
 		actual.Maps[expected.Name] = reconcile.MapState{ID: 1, Name: expected.Name, KeySize: expected.KeySize, ValueSize: expected.ValueSize, MaxEntries: expected.MaxEntries}
 	}
 	return actual
+}
+
+func instructionTag(t *testing.T, instructions asm.Instructions, digest func() hash.Hash) string {
+	t.Helper()
+	h := digest()
+	if err := instructions.Marshal(h, binary.LittleEndian); err != nil {
+		t.Fatalf("marshal instructions for tag: %v", err)
+	}
+	return hex.EncodeToString(h.Sum(nil)[:8])
 }
 
 func testCollectionSpec() *ebpf.CollectionSpec {

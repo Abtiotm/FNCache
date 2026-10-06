@@ -29,17 +29,30 @@ type backendControl struct{ disabled bool }
 
 func (f *backendControl) Disable(context.Context) error { f.disabled = true; return nil }
 
-type backendCollection struct{ calls int }
+type backendCollection struct {
+	calls  int
+	err    error
+	events *[]string
+}
 
 func (f *backendCollection) EnsureCollection(context.Context, reconcile.DesiredState, reconcile.ActualState) (bool, error) {
 	f.calls++
-	return true, nil
+	if f.events != nil {
+		*f.events = append(*f.events, "collection")
+	}
+	return true, f.err
 }
 
-type backendMarker struct{ calls int }
+type backendMarker struct {
+	calls  int
+	events *[]string
+}
 
 func (f *backendMarker) EnsureMarker(context.Context, reconcile.DesiredState) (bool, error) {
 	f.calls++
+	if f.events != nil {
+		*f.events = append(*f.events, "marker")
+	}
 	return true, nil
 }
 
@@ -110,6 +123,66 @@ func TestFirstPassBackendRunsAllStagesAndPublishesLastScan(t *testing.T) {
 	}
 	if observer.scans < 3 || len(*store.events) != 2 || (*store.events)[0] != "commit" || (*store.events)[1] != "publish" {
 		t.Fatalf("unexpected scan or publish sequence: scans=%d events=%v", observer.scans, *store.events)
+	}
+}
+
+func TestFirstPassBackendEnsuresMarkerBeforeCollection(t *testing.T) {
+	desired := publishTestDesired()
+	events := []string{}
+	store := &fakeOwnershipCommitter{events: &events}
+	publisher, err := NewPublisher(store, &fakeControlPublisher{events: &events}, publishTestConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend, err := NewFirstPassBackend(FirstPassBackendConfig{
+		Observer: &backendObserver{desired: desired, actual: publishTestActual(desired)}, Control: &backendControl{},
+		Collection: &backendCollection{events: &events}, Marker: &backendMarker{events: &events},
+		Base: &backendEnsurer{}, Endpoint: &backendEnsurer{}, Maps: &backendEnsurer{},
+		Ownership: store, Remover: &backendRemover{}, Publisher: publisher,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator, err := reconcile.NewCoordinator(backend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coordinator.FullReconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) < 2 || events[0] != "marker" || events[1] != "collection" {
+		t.Fatalf("marker was not ensured before collection: %v", events)
+	}
+}
+
+func TestFirstPassBackendEnsuresMarkerWhenCollectionFails(t *testing.T) {
+	desired := publishTestDesired()
+	events := []string{}
+	wantErr := errors.New("stale collection")
+	store := &fakeOwnershipCommitter{events: &events}
+	publisher, err := NewPublisher(store, &fakeControlPublisher{events: &events}, publishTestConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend, err := NewFirstPassBackend(FirstPassBackendConfig{
+		Observer: &backendObserver{desired: desired, actual: publishTestActual(desired)}, Control: &backendControl{},
+		Collection: &backendCollection{err: wantErr, events: &events}, Marker: &backendMarker{events: &events},
+		Base: &backendEnsurer{}, Endpoint: &backendEnsurer{}, Maps: &backendEnsurer{},
+		Ownership: store, Remover: &backendRemover{}, Publisher: publisher,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator, err := reconcile.NewCoordinator(backend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := coordinator.FullReconcile(context.Background())
+	if !errors.Is(err, wantErr) || result.State != reconcile.AgentDisabled {
+		t.Fatalf("collection failure did not remain disabled: result=%+v err=%v", result, err)
+	}
+	if len(events) < 2 || events[0] != "marker" || events[1] != "collection" {
+		t.Fatalf("marker was not ensured before failed collection: %v", events)
 	}
 }
 
