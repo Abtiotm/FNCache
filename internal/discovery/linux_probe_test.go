@@ -111,6 +111,49 @@ func TestLinuxProbeDetectsPinnedBPFConflict(t *testing.T) {
 	}
 }
 
+func TestLinuxProbeDetectsPinnedBPFMapConflict(t *testing.T) {
+	var mapArgs []string
+	runner := func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if name == "bpftool" {
+			if hasArg(args, "prog") {
+				if !hasArg(args, "-f") {
+					return []byte(`[{"id":1}]`), nil
+				}
+				return []byte(`[]`), nil
+			}
+			if hasArg(args, "map") {
+				mapArgs = append([]string(nil), args...)
+				if !hasArg(args, "-f") {
+					return []byte(`[]`), nil
+				}
+				return []byte(`[{"id":1,"pinned":["/sys/fs/bpf/oncache/v1/maps/external_map"]}]`), nil
+			}
+		}
+		return fakeCommandRunner(ctx, name, args...)
+	}
+	probe, request, cleanup := probeFixtureWithRunner(t, true, true, true, runner)
+	defer cleanup()
+
+	snapshot, err := probe.Probe(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasArg(mapArgs, "-f") {
+		t.Fatalf("bpftool map query did not request pinned paths: %v", mapArgs)
+	}
+
+	for _, check := range snapshot.Checks {
+		if check.Name != "external/conflicts" {
+			continue
+		}
+		if check.Supported || check.ReasonCode != "EXTERNAL_OBJECT_CONFLICT" {
+			t.Fatalf("expected pinned BPF map conflict, got %+v", check)
+		}
+		return
+	}
+	t.Fatal("external conflict check was not reported")
+}
+
 func probeFixture(t *testing.T, mount, btf, cri bool) (*discovery.LinuxProbe, discovery.PreflightRequest, func()) {
 	return probeFixtureWithRunner(t, mount, btf, cri, fakeCommandRunner)
 }
