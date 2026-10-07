@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
@@ -271,6 +272,26 @@ func TestPublisherUsesConfiguredMapCapacities(t *testing.T) {
 	desired := publishTestDesired()
 	if err := publisher.CommitAndPublish(context.Background(), desired, publishTestActualWithSchema(desired, schema)); err != nil {
 		t.Fatalf("configured Map capacities were rejected: %v", err)
+	}
+}
+
+func TestNewPublisherRejectsIncompleteMapSchema(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		schema datapath.CollectionSchema
+		want   string
+	}{
+		{name: "missing all Maps", schema: datapath.CollectionSchema{Programs: append([]string(nil), requiredPrograms...)}, want: "Map schema count mismatch"},
+		{name: "missing one Map", schema: datapath.CollectionSchema{Programs: append([]string(nil), requiredPrograms...), Maps: datapath.V1Schema().Maps[:len(datapath.V1Schema().Maps)-1]}, want: "Map schema count mismatch"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			config := publishTestConfig()
+			config.Schema = test.schema
+			_, err := NewPublisher(&fakeOwnershipCommitter{}, &fakeControlPublisher{}, config)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("incomplete schema error = %v, want substring %q", err, test.want)
+			}
+		})
 	}
 }
 

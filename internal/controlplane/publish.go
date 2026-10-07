@@ -56,6 +56,9 @@ func NewPublisher(store OwnershipCommitter, control ControlPublisher, config Pub
 	if len(config.Schema.Maps) == 0 && len(config.Schema.Programs) == 0 {
 		config.Schema = datapath.V1Schema()
 	}
+	if err := validatePublisherSchema(config.Schema); err != nil {
+		return nil, err
+	}
 	return &Publisher{store: store, control: control, config: config, schema: config.Schema}, nil
 }
 
@@ -192,6 +195,72 @@ func validateDatapathConfig(desired reconcile.DesiredState) error {
 }
 
 var requiredPrograms = []string{"tc_init_e", "tc_restore", "tc_init_in", "tc_masq"}
+
+func validatePublisherSchema(schema datapath.CollectionSchema) error {
+	if err := validateSchemaNames("program", requiredPrograms, schema.Programs); err != nil {
+		return err
+	}
+	expectedSchema := datapath.V1Schema()
+	expectedMaps := make(map[string]datapath.MapSchema, len(expectedSchema.Maps))
+	for _, expected := range expectedSchema.Maps {
+		expectedMaps[expected.Name] = expected
+	}
+	actualMaps := make(map[string]datapath.MapSchema, len(schema.Maps))
+	for _, actual := range schema.Maps {
+		if actual.Name == "" {
+			return fmt.Errorf("publisher Map schema contains an empty name")
+		}
+		if _, exists := actualMaps[actual.Name]; exists {
+			return fmt.Errorf("publisher Map schema contains duplicate Map: %s", actual.Name)
+		}
+		actualMaps[actual.Name] = actual
+	}
+	if len(actualMaps) != len(expectedMaps) {
+		return fmt.Errorf("publisher Map schema count mismatch: got %d want %d", len(actualMaps), len(expectedMaps))
+	}
+	for name, expected := range expectedMaps {
+		actual, ok := actualMaps[name]
+		if !ok {
+			return fmt.Errorf("publisher Map schema is missing: %s", name)
+		}
+		if actual.Type != expected.Type || actual.KeySize != expected.KeySize || actual.ValueSize != expected.ValueSize || actual.Flags != expected.Flags {
+			return fmt.Errorf("publisher Map schema mismatch for %s", name)
+		}
+		if isPublisherCapacityMap(name) {
+			if actual.MaxEntries == 0 {
+				return fmt.Errorf("publisher Map capacity must be greater than zero: %s", name)
+			}
+		} else if actual.MaxEntries != expected.MaxEntries {
+			return fmt.Errorf("publisher fixed Map capacity mismatch for %s: got %d want %d", name, actual.MaxEntries, expected.MaxEntries)
+		}
+	}
+	return nil
+}
+
+func validateSchemaNames(kind string, expected, actual []string) error {
+	expectedCopy := append([]string(nil), expected...)
+	actualCopy := append([]string(nil), actual...)
+	sort.Strings(expectedCopy)
+	sort.Strings(actualCopy)
+	if len(expectedCopy) != len(actualCopy) {
+		return fmt.Errorf("publisher %s schema count mismatch: got %v want %v", kind, actualCopy, expectedCopy)
+	}
+	for index := range expectedCopy {
+		if expectedCopy[index] != actualCopy[index] {
+			return fmt.Errorf("publisher %s schema mismatch: got %v want %v", kind, actualCopy, expectedCopy)
+		}
+	}
+	return nil
+}
+
+func isPublisherCapacityMap(name string) bool {
+	switch name {
+	case "egressip_cache", "egress_cache", "ingress_cache", "policy_cache", "devmap":
+		return true
+	default:
+		return false
+	}
+}
 
 func verifyAttachment(attachments []reconcile.AttachmentState, link resolver.LinkIdentity, hook datapath.TCHook, program string, programID uint32) error {
 	spec, err := datapath.NewFixedFilter(link, program, programID, true)
