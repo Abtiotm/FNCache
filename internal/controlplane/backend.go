@@ -151,16 +151,16 @@ func (b *FirstPassBackend) Ensure(ctx context.Context, desired reconcile.Desired
 	if err != nil {
 		return changed, fmt.Errorf("repair owned orphans: %w", err)
 	}
-	collectionChanged, err := b.collection.EnsureCollection(ctx, desired, actual)
-	if err != nil {
-		return changed, fmt.Errorf("ensure collection: %w", err)
-	}
-	changed = changed || collectionChanged
 	markerChanged, err := b.marker.EnsureMarker(ctx, desired)
 	if err != nil {
 		return changed || markerChanged, fmt.Errorf("ensure Flannel marker: %w", err)
 	}
 	changed = changed || markerChanged
+	collectionChanged, err := b.collection.EnsureCollection(ctx, desired, actual)
+	if err != nil {
+		return changed, fmt.Errorf("ensure collection: %w", err)
+	}
+	changed = changed || collectionChanged
 	current, err := b.observer.Scan(ctx)
 	if err != nil {
 		return changed, fmt.Errorf("rescan after collection ensure: %w", err)
