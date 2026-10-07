@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"testing"
 
+	"github.com/cat-cc-Lcos/FNCache/internal/datapath"
 	"github.com/cat-cc-Lcos/FNCache/internal/reconcile"
 	"github.com/cat-cc-Lcos/FNCache/internal/resolver"
 )
@@ -151,6 +152,22 @@ func TestMapEnsurerRejectsInvalidIdentityOrSchema(t *testing.T) {
 	}
 }
 
+func TestMapEnsurerUsesConfiguredMapCapacities(t *testing.T) {
+	capacities := datapath.DefaultMapCapacities()
+	capacities.IngressCacheMaxEntries = 2048
+	capacities.DevMapMaxEntries = 16
+	schema := datapath.V1SchemaWithCapacities(capacities)
+	store := &fakeMapStore{}
+	ensurer, err := NewMapEnsurerWithSchema(store, schema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint := mapEnsureTestEndpoint()
+	if _, err := ensurer.EnsureEndpointMaps(context.Background(), mapEnsureDesired(endpoint), mapEnsureActualWithSchema(schema), endpoint, true); err != nil {
+		t.Fatalf("configured Map capacities were rejected: %v", err)
+	}
+}
+
 func mapEnsureTestEndpoint() resolver.Endpoint {
 	return resolver.Endpoint{
 		Pod:  resolver.PodIdentity{Namespace: "default", Name: "web", UID: "pod-a"},
@@ -165,8 +182,14 @@ func mapEnsureDesired(endpoint resolver.Endpoint) reconcile.DesiredState {
 }
 
 func mapEnsureActual() reconcile.ActualState {
+	return mapEnsureActualWithSchema(datapath.V1Schema())
+}
+
+func mapEnsureActualWithSchema(schema datapath.CollectionSchema) reconcile.ActualState {
+	ingress, _ := mapSchema(schema, "ingress_cache")
+	devmap, _ := mapSchema(schema, "devmap")
 	return reconcile.ActualState{Control: reconcile.ControlState{Verified: true}, Maps: map[string]reconcile.MapState{
-		"ingress_cache": {Name: "ingress_cache", KeySize: 4, ValueSize: 16, MaxEntries: 1024},
-		"devmap":        {Name: "devmap", KeySize: 4, ValueSize: 12, MaxEntries: 8},
+		"ingress_cache": {Name: ingress.Name, KeySize: ingress.KeySize, ValueSize: ingress.ValueSize, MaxEntries: ingress.MaxEntries},
+		"devmap":        {Name: devmap.Name, KeySize: devmap.KeySize, ValueSize: devmap.ValueSize, MaxEntries: devmap.MaxEntries},
 	}}
 }

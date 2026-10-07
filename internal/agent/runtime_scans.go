@@ -10,14 +10,22 @@ import (
 
 type RuntimeScanAdapter struct {
 	observer *DynamicObserver
+	verify   func(reconcile.DesiredState, reconcile.ActualState) error
 	light    []func(context.Context) error
 }
 
 func NewRuntimeScanAdapter(observer *DynamicObserver, light ...func(context.Context) error) (*RuntimeScanAdapter, error) {
+	return NewRuntimeScanAdapterWithVerifier(observer, controlplane.VerifyState, light...)
+}
+
+func NewRuntimeScanAdapterWithVerifier(observer *DynamicObserver, verify func(reconcile.DesiredState, reconcile.ActualState) error, light ...func(context.Context) error) (*RuntimeScanAdapter, error) {
 	if observer == nil {
 		return nil, errors.New("dynamic observer is required")
 	}
-	return &RuntimeScanAdapter{observer: observer, light: append([]func(context.Context) error(nil), light...)}, nil
+	if verify == nil {
+		return nil, errors.New("runtime state verifier is required")
+	}
+	return &RuntimeScanAdapter{observer: observer, verify: verify, light: append([]func(context.Context) error(nil), light...)}, nil
 }
 
 func (s *RuntimeScanAdapter) Light(ctx context.Context) ScanResult {
@@ -50,7 +58,7 @@ func (s *RuntimeScanAdapter) classifyRuntimeScan(ctx context.Context, level Scan
 	}
 	verification := actual
 	verification.Control.Enabled = false
-	if err := controlplane.VerifyState(desired, verification); err != nil {
+	if err := s.verify(desired, verification); err != nil {
 		return ScanResult{Level: level, Critical: true, InvalidateEpoch: true, Reason: "DATAPATH_STATE_INCOMPLETE", Err: err}
 	}
 	return result

@@ -25,6 +25,31 @@ type CollectionSchema struct {
 	Maps     []MapSchema
 }
 
+type MapCapacities struct {
+	IngressCacheMaxEntries  uint32
+	EgressIPCacheMaxEntries uint32
+	EgressCacheMaxEntries   uint32
+	PolicyCacheMaxEntries   uint32
+	DevMapMaxEntries        uint32
+}
+
+func DefaultMapCapacities() MapCapacities {
+	return MapCapacities{
+		IngressCacheMaxEntries:  1024,
+		EgressIPCacheMaxEntries: 4096,
+		EgressCacheMaxEntries:   1024,
+		PolicyCacheMaxEntries:   4096,
+		DevMapMaxEntries:        8,
+	}
+}
+
+func (c MapCapacities) Validate() error {
+	if c.IngressCacheMaxEntries == 0 || c.EgressIPCacheMaxEntries == 0 || c.EgressCacheMaxEntries == 0 || c.PolicyCacheMaxEntries == 0 || c.DevMapMaxEntries == 0 {
+		return fmt.Errorf("Map capacities must be greater than zero")
+	}
+	return nil
+}
+
 type MapDescriptor struct {
 	Type       ebpf.MapType
 	KeySize    uint32
@@ -59,6 +84,9 @@ func (m *Manager) LoadCollection(r io.ReaderAt, schema CollectionSchema) (*ebpf.
 	spec, err := ebpf.LoadCollectionSpecFromReader(r)
 	if err != nil {
 		return nil, fmt.Errorf("load BPF collection spec: %w", err)
+	}
+	if err := applyConfiguredMapCapacities(spec, schema); err != nil {
+		return nil, err
 	}
 	if err := ValidateCollectionSpec(spec, schema); err != nil {
 		return nil, err
@@ -137,10 +165,16 @@ func removePinnedProgram(ctx context.Context, path, name string, expectedID uint
 }
 
 func (m *Manager) LoadAndPin(spec *ebpf.CollectionSpec, schema CollectionSchema) (*LoadedCollection, error) {
-	if err := ValidateCollectionSpec(spec, schema); err != nil {
-		return nil, err
+	if spec == nil {
+		return nil, fmt.Errorf("BPF collection spec is nil")
 	}
 	copySpec := spec.Copy()
+	if err := applyConfiguredMapCapacities(copySpec, schema); err != nil {
+		return nil, err
+	}
+	if err := ValidateCollectionSpec(copySpec, schema); err != nil {
+		return nil, err
+	}
 	existingMaps := make(map[string]bool)
 	for _, expected := range schema.Maps {
 		path, _ := m.MapPinPath(expected.Name)
@@ -258,6 +292,33 @@ func ValidateCollectionSpec(spec *ebpf.CollectionSpec, schema CollectionSchema) 
 	return nil
 }
 
+// applyConfiguredMapCapacities replaces the baseline max_entries values from
+// the checked-in ELF with deployment-specific capacities before validation and
+// kernel map creation. Map type, key/value sizes, flags, and fixed Map sizes
+// remain strict schema requirements.
+func applyConfiguredMapCapacities(spec *ebpf.CollectionSpec, schema CollectionSchema) error {
+	if spec == nil {
+		return fmt.Errorf("BPF collection spec is nil")
+	}
+	for _, expected := range schema.Maps {
+		actual, ok := spec.Maps[expected.Name]
+		if !ok || !isConfigurableMap(expected.Name) {
+			continue
+		}
+		actual.MaxEntries = expected.MaxEntries
+	}
+	return nil
+}
+
+func isConfigurableMap(name string) bool {
+	switch name {
+	case "egressip_cache", "egress_cache", "ingress_cache", "policy_cache", "devmap":
+		return true
+	default:
+		return false
+	}
+}
+
 func validateMap(actual *ebpf.MapSpec, expected MapSchema) error {
 	got := MapDescriptor{Type: actual.Type, KeySize: actual.KeySize, ValueSize: actual.ValueSize, MaxEntries: actual.MaxEntries, Flags: actual.Flags}
 	return validateDescriptor(got, expected)
@@ -285,14 +346,18 @@ func compareNames(kind string, expected, actual []string) error {
 }
 
 func V1Schema() CollectionSchema {
+	return V1SchemaWithCapacities(DefaultMapCapacities())
+}
+
+func V1SchemaWithCapacities(capacities MapCapacities) CollectionSchema {
 	return CollectionSchema{
 		Programs: []string{"tc_init_e", "tc_init_in", "tc_masq", "tc_restore"},
 		Maps: []MapSchema{
-			{Name: "egressip_cache", Type: ebpf.LRUHash, KeySize: 4, ValueSize: 4, MaxEntries: 4096},
-			{Name: "egress_cache", Type: ebpf.LRUHash, KeySize: 4, ValueSize: 68, MaxEntries: 1024},
-			{Name: "ingress_cache", Type: ebpf.LRUHash, KeySize: 4, ValueSize: 16, MaxEntries: 1024},
-			{Name: "policy_cache", Type: ebpf.LRUHash, KeySize: 16, ValueSize: 4, MaxEntries: 4096},
-			{Name: "devmap", Type: ebpf.LRUHash, KeySize: 4, ValueSize: 12, MaxEntries: 8},
+			{Name: "egressip_cache", Type: ebpf.LRUHash, KeySize: 4, ValueSize: 4, MaxEntries: capacities.EgressIPCacheMaxEntries},
+			{Name: "egress_cache", Type: ebpf.LRUHash, KeySize: 4, ValueSize: 68, MaxEntries: capacities.EgressCacheMaxEntries},
+			{Name: "ingress_cache", Type: ebpf.LRUHash, KeySize: 4, ValueSize: 16, MaxEntries: capacities.IngressCacheMaxEntries},
+			{Name: "policy_cache", Type: ebpf.LRUHash, KeySize: 16, ValueSize: 4, MaxEntries: capacities.PolicyCacheMaxEntries},
+			{Name: "devmap", Type: ebpf.LRUHash, KeySize: 4, ValueSize: 12, MaxEntries: capacities.DevMapMaxEntries},
 			{Name: "control_map", Type: ebpf.Array, KeySize: 4, ValueSize: 40, MaxEntries: 1},
 			{Name: "policy_lock_map", Type: ebpf.Array, KeySize: 4, ValueSize: 4, MaxEntries: 1},
 			{Name: "stats_map", Type: ebpf.PerCPUArray, KeySize: 4, ValueSize: 8, MaxEntries: 14},

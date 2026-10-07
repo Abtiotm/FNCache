@@ -251,6 +251,29 @@ func TestPublisherKeepsFailureWhenControlPublishFails(t *testing.T) {
 	}
 }
 
+func TestPublisherUsesConfiguredMapCapacities(t *testing.T) {
+	capacities := datapath.DefaultMapCapacities()
+	capacities.IngressCacheMaxEntries = 2048
+	capacities.EgressIPCacheMaxEntries = 8192
+	capacities.EgressCacheMaxEntries = 2048
+	capacities.PolicyCacheMaxEntries = 8192
+	capacities.DevMapMaxEntries = 16
+	schema := datapath.V1SchemaWithCapacities(capacities)
+	config := publishTestConfig()
+	config.Schema = schema
+	events := []string{}
+	store := &fakeOwnershipCommitter{events: &events}
+	control := &fakeControlPublisher{events: &events}
+	publisher, err := NewPublisher(store, control, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired := publishTestDesired()
+	if err := publisher.CommitAndPublish(context.Background(), desired, publishTestActualWithSchema(desired, schema)); err != nil {
+		t.Fatalf("configured Map capacities were rejected: %v", err)
+	}
+}
+
 func publishTestConfig() PublishConfig {
 	return PublishConfig{InstallationID: "install-a", NodeUID: "node-a", ELFBuildID: "sha256:build", HeartbeatNS: 100, HeartbeatTimeoutNS: 500, Now: func() time.Time { return time.Unix(42, 0).UTC() }}
 }
@@ -270,12 +293,16 @@ func publishTestDesired() reconcile.DesiredState {
 }
 
 func publishTestActual(desired reconcile.DesiredState) reconcile.ActualState {
+	return publishTestActualWithSchema(desired, datapath.V1Schema())
+}
+
+func publishTestActualWithSchema(desired reconcile.DesiredState, schema datapath.CollectionSchema) reconcile.ActualState {
 	actual := reconcile.ActualState{Control: reconcile.ControlState{Verified: true}, Programs: map[string]reconcile.ProgramState{
 		"tc_init_e": {ID: 10, Name: "tc_init_e"}, "tc_restore": {ID: 11, Name: "tc_restore"},
 		"tc_init_in": {ID: 12, Name: "tc_init_in"}, "tc_masq": {ID: 13, Name: "tc_masq"},
 	}, Maps: make(map[string]reconcile.MapState), FlannelRule: reconcile.RuleState{Present: true, JumpsPresent: true, Identity: "ONCACHE/oncache:install-a", Fingerprint: "rule-fp"}}
-	for _, expected := range requiredMaps {
-		actual.Maps[expected.name] = reconcile.MapState{ID: 1, Name: expected.name, KeySize: expected.keySize, ValueSize: expected.valueSize, MaxEntries: expected.maxEntries}
+	for _, expected := range schema.Maps {
+		actual.Maps[expected.Name] = reconcile.MapState{ID: 1, Name: expected.Name, KeySize: expected.KeySize, ValueSize: expected.ValueSize, MaxEntries: expected.MaxEntries}
 	}
 	addPublishAttachment := func(link resolver.LinkIdentity, program string, id uint32) {
 		spec, err := datapath.NewFixedFilter(link, program, id, true)

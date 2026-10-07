@@ -25,6 +25,7 @@ type PublishConfig struct {
 	InstallationID     string
 	NodeUID            string
 	ELFBuildID         string
+	Schema             datapath.CollectionSchema
 	HeartbeatNS        uint64
 	HeartbeatTimeoutNS uint64
 	Flags              uint32
@@ -35,6 +36,7 @@ type Publisher struct {
 	store   OwnershipCommitter
 	control ControlPublisher
 	config  PublishConfig
+	schema  datapath.CollectionSchema
 	guard   PublishGuard
 }
 
@@ -51,7 +53,10 @@ func NewPublisher(store OwnershipCommitter, control ControlPublisher, config Pub
 	if config.Now == nil {
 		config.Now = time.Now
 	}
-	return &Publisher{store: store, control: control, config: config}, nil
+	if len(config.Schema.Maps) == 0 && len(config.Schema.Programs) == 0 {
+		config.Schema = datapath.V1Schema()
+	}
+	return &Publisher{store: store, control: control, config: config, schema: config.Schema}, nil
 }
 
 // SetPublishGuard installs a freshness check before this publisher commits or
@@ -72,7 +77,7 @@ func (p *Publisher) checkPublishGuard(ctx context.Context) error {
 }
 
 func (p *Publisher) CommitAndPublish(ctx context.Context, desired reconcile.DesiredState, actual reconcile.ActualState) error {
-	if err := VerifyState(desired, actual); err != nil {
+	if err := p.VerifyState(desired, actual); err != nil {
 		return err
 	}
 	if err := p.checkPublishGuard(ctx); err != nil {
@@ -90,6 +95,10 @@ func (p *Publisher) CommitAndPublish(ctx context.Context, desired reconcile.Desi
 		return fmt.Errorf("publish generation %d: %w", desired.Generation, err)
 	}
 	return nil
+}
+
+func (p *Publisher) VerifyState(desired reconcile.DesiredState, actual reconcile.ActualState) error {
+	return verifyState(desired, actual, p.schema)
 }
 
 func endpointScanCompletenessError(skipped map[string]string) error {
@@ -113,6 +122,10 @@ func validateActualEndpointScanCompleteness(actual reconcile.ActualState) error 
 }
 
 func VerifyState(desired reconcile.DesiredState, actual reconcile.ActualState) error {
+	return verifyState(desired, actual, datapath.V1Schema())
+}
+
+func verifyState(desired reconcile.DesiredState, actual reconcile.ActualState, schema datapath.CollectionSchema) error {
 	if !desired.Enabled {
 		return fmt.Errorf("cannot publish disabled desired state")
 	}
@@ -142,10 +155,10 @@ func VerifyState(desired reconcile.DesiredState, actual reconcile.ActualState) e
 		}
 		programs[name] = program.ID
 	}
-	for _, expected := range requiredMaps {
-		state, ok := actual.Maps[expected.name]
-		if !ok || state.ID == 0 || state.KeySize != expected.keySize || state.ValueSize != expected.valueSize || state.MaxEntries != expected.maxEntries {
-			return fmt.Errorf("required Map schema is not verified: %s", expected.name)
+	for _, expected := range schema.Maps {
+		state, ok := actual.Maps[expected.Name]
+		if !ok || state.ID == 0 || state.KeySize != expected.KeySize || state.ValueSize != expected.ValueSize || state.MaxEntries != expected.MaxEntries {
+			return fmt.Errorf("required Map schema is not verified: %s", expected.Name)
 		}
 	}
 	if !actual.FlannelRule.Present || !actual.FlannelRule.JumpsPresent {
@@ -179,20 +192,6 @@ func validateDatapathConfig(desired reconcile.DesiredState) error {
 }
 
 var requiredPrograms = []string{"tc_init_e", "tc_restore", "tc_init_in", "tc_masq"}
-
-var requiredMaps = []struct {
-	name                           string
-	keySize, valueSize, maxEntries uint32
-}{
-	{name: "egressip_cache", keySize: 4, valueSize: 4, maxEntries: 4096},
-	{name: "egress_cache", keySize: 4, valueSize: 68, maxEntries: 1024},
-	{name: "ingress_cache", keySize: 4, valueSize: 16, maxEntries: 1024},
-	{name: "policy_cache", keySize: 16, valueSize: 4, maxEntries: 4096},
-	{name: "devmap", keySize: 4, valueSize: 12, maxEntries: 8},
-	{name: "control_map", keySize: 4, valueSize: 40, maxEntries: 1},
-	{name: "policy_lock_map", keySize: 4, valueSize: 4, maxEntries: 1},
-	{name: "stats_map", keySize: 4, valueSize: 8, maxEntries: 14},
-}
 
 func verifyAttachment(attachments []reconcile.AttachmentState, link resolver.LinkIdentity, hook datapath.TCHook, program string, programID uint32) error {
 	spec, err := datapath.NewFixedFilter(link, program, programID, true)

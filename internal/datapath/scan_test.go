@@ -19,6 +19,7 @@ type fakePinBackend struct {
 	mapErr     error
 	controlErr error
 	progErr    error
+	inspected  map[string]MapSchema
 }
 
 func (f *fakePinBackend) List(path string) ([]string, error) {
@@ -27,9 +28,12 @@ func (f *fakePinBackend) List(path string) ([]string, error) {
 	}
 	return f.names[filepath.Base(path)], nil
 }
-func (f *fakePinBackend) InspectMap(path string, _ MapSchema) (reconcile.MapState, error) {
+func (f *fakePinBackend) InspectMap(path string, expected MapSchema) (reconcile.MapState, error) {
 	if f.mapErr != nil {
 		return reconcile.MapState{}, f.mapErr
+	}
+	if f.inspected != nil {
+		f.inspected[filepath.Base(path)] = expected
 	}
 	return f.maps[filepath.Base(path)], nil
 }
@@ -75,6 +79,27 @@ func TestPinScannerAllowsMissingDirectories(t *testing.T) {
 	actual, err := testPinScanner(t, &fakePinBackend{names: map[string][]string{}}).Scan(context.Background())
 	if err != nil || len(actual.Maps) != 0 || len(actual.Programs) != 0 {
 		t.Fatalf("missing pin directories should be empty state: actual=%+v err=%v", actual, err)
+	}
+}
+
+func TestPinScannerUsesConfiguredMapCapacities(t *testing.T) {
+	capacities := DefaultMapCapacities()
+	capacities.IngressCacheMaxEntries = 2048
+	schema := V1SchemaWithCapacities(capacities)
+	backend := &fakePinBackend{
+		names:     map[string][]string{"maps": {"ingress_cache"}},
+		maps:      map[string]reconcile.MapState{"ingress_cache": {ID: 7, Name: "ingress_cache", KeySize: 4, ValueSize: 16, MaxEntries: 2048}},
+		inspected: make(map[string]MapSchema),
+	}
+	scanner, err := newPinScannerWithSchema("/sys/fs/bpf/oncache/v1", schema, backend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := scanner.Scan(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := backend.inspected["ingress_cache"].MaxEntries; got != 2048 {
+		t.Fatalf("scanner expected max entries = %d, want 2048", got)
 	}
 }
 

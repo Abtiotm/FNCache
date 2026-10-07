@@ -21,35 +21,43 @@ type pinBackend interface {
 type PinScanner struct {
 	pinRoot string
 	backend pinBackend
+	schema  CollectionSchema
 	now     func() time.Time
 }
 
 func NewPinScanner(pinRoot string) (*PinScanner, error) {
-	return newPinScanner(pinRoot, ciliumPinBackend{})
+	return NewPinScannerWithSchema(pinRoot, V1Schema())
+}
+
+func NewPinScannerWithSchema(pinRoot string, schema CollectionSchema) (*PinScanner, error) {
+	return newPinScannerWithSchema(pinRoot, schema, ciliumPinBackend{})
 }
 
 func newPinScanner(pinRoot string, backend pinBackend) (*PinScanner, error) {
+	return newPinScannerWithSchema(pinRoot, V1Schema(), backend)
+}
+
+func newPinScannerWithSchema(pinRoot string, schema CollectionSchema, backend pinBackend) (*PinScanner, error) {
 	if pinRoot == "" || !filepath.IsAbs(pinRoot) || filepath.Clean(pinRoot) == string(filepath.Separator) {
 		return nil, fmt.Errorf("BPF pin root must be a dedicated absolute directory")
 	}
 	if backend == nil {
 		return nil, fmt.Errorf("BPF pin scan backend is required")
 	}
-	return &PinScanner{pinRoot: filepath.Clean(pinRoot), backend: backend, now: time.Now}, nil
+	return &PinScanner{pinRoot: filepath.Clean(pinRoot), backend: backend, schema: schema, now: time.Now}, nil
 }
 
 func (s *PinScanner) Scan(ctx context.Context) (reconcile.ActualState, error) {
 	actual := reconcile.ActualState{ScannedAt: s.now(), Maps: make(map[string]reconcile.MapState), Programs: make(map[string]reconcile.ProgramState)}
-	schema := V1Schema()
-	expectedMaps := make(map[string]MapSchema, len(schema.Maps))
-	for _, item := range schema.Maps {
+	expectedMaps := make(map[string]MapSchema, len(s.schema.Maps))
+	for _, item := range s.schema.Maps {
 		expectedMaps[item.Name] = item
 	}
 	if err := s.scanMaps(ctx, expectedMaps, &actual); err != nil {
 		return reconcile.ActualState{}, err
 	}
-	expectedPrograms := make(map[string]struct{}, len(schema.Programs))
-	for _, name := range schema.Programs {
+	expectedPrograms := make(map[string]struct{}, len(s.schema.Programs))
+	for _, name := range s.schema.Programs {
 		expectedPrograms[name] = struct{}{}
 	}
 	if err := s.scanPrograms(ctx, expectedPrograms, &actual); err != nil {

@@ -57,6 +57,27 @@ func TestLoadRejectsMissingDynamicDatapathIdentity(t *testing.T) {
 	}
 }
 
+func TestLoadPreservesCustomMapCapacities(t *testing.T) {
+	t.Setenv("ONCACHE_NODE_NAME", "node-a")
+	t.Setenv("ONCACHE_LOG_LEVEL", "info")
+	path := writeConfig(t, `nodeName: node-a
+maps:
+  ingressCacheMaxEntries: 2048
+  egressIPCacheMaxEntries: 8192
+  egressCacheMaxEntries: 2048
+  policyCacheMaxEntries: 8192
+  devMapMaxEntries: 16
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := MapConfig{IngressCacheMaxEntries: 2048, EgressIPCacheMaxEntries: 8192, EgressCacheMaxEntries: 2048, PolicyCacheMaxEntries: 8192, DevMapMaxEntries: 16}
+	if cfg.Maps != want {
+		t.Fatalf("custom Map capacities were not preserved: got=%+v want=%+v", cfg.Maps, want)
+	}
+}
+
 func TestDefaultsAndValidationIncludeResyncInterval(t *testing.T) {
 	cfg := defaults()
 	if time.Duration(cfg.Kube.ResyncInterval) != 30*time.Minute {

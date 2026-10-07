@@ -13,6 +13,7 @@ import (
 
 	"github.com/cat-cc-Lcos/FNCache/internal/config"
 	"github.com/cat-cc-Lcos/FNCache/internal/controlplane"
+	"github.com/cat-cc-Lcos/FNCache/internal/datapath"
 	"github.com/cat-cc-Lcos/FNCache/internal/discovery"
 	"github.com/cat-cc-Lcos/FNCache/internal/kube"
 	"github.com/cat-cc-Lcos/FNCache/internal/overlay/flannel"
@@ -363,6 +364,11 @@ func (r *DynamicRuntime) initializeDatapath(ctx context.Context) error {
 		ELFPath: r.config.Datapath.ELFPath, PinRoot: r.config.PinRoot, StatePath: filepath.Join(r.config.StateDir, "state.json"),
 		InstallationID: r.config.InstallationID, ELFBuildID: r.config.Datapath.ELFBuildID, HeartbeatNS: heartbeat,
 		HeartbeatTimeoutNS: uint64(time.Duration(r.config.Heartbeat.Timeout)), Flags: 0,
+		MapCapacities: datapath.MapCapacities{
+			IngressCacheMaxEntries: r.config.Maps.IngressCacheMaxEntries, EgressIPCacheMaxEntries: r.config.Maps.EgressIPCacheMaxEntries,
+			EgressCacheMaxEntries: r.config.Maps.EgressCacheMaxEntries, PolicyCacheMaxEntries: r.config.Maps.PolicyCacheMaxEntries,
+			DevMapMaxEntries: r.config.Maps.DevMapMaxEntries,
+		},
 		Preflight: discovery.PreflightRequest{Node: node.Identity, PinRoot: r.config.PinRoot, StateDir: r.config.StateDir, RuntimeURI: r.config.RuntimeEndpoint, Overlay: r.config.Overlay.Type},
 		Flannel:   r.flannelDiscoveryRequest(),
 		Marker:    r.markerRuleSpec(),
@@ -410,7 +416,7 @@ func (r *DynamicRuntime) initializeDatapath(ctx context.Context) error {
 		_ = components.Close()
 		return err
 	}
-	scanAdapter, err := NewRuntimeScanAdapter(observer, r.apiHealth.Check, flannelHealth.Check, markerHealth.Check)
+	scanAdapter, err := NewRuntimeScanAdapterWithVerifier(observer, components.publisher.VerifyState, r.apiHealth.Check, flannelHealth.Check, markerHealth.Check)
 	if err != nil {
 		_ = components.Close()
 		return err

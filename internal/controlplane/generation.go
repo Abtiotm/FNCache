@@ -65,7 +65,7 @@ func (t *GenerationTransaction) Execute(ctx context.Context, desired reconcile.D
 	if err != nil {
 		return fmt.Errorf("scan after generation mutation: %w", err)
 	}
-	if err := VerifyState(desired, after); err != nil {
+	if err := t.publish.VerifyState(desired, after); err != nil {
 		return fmt.Errorf("verify generation %d: %w", desired.Generation, err)
 	}
 	if err := t.publish.CommitAndPublish(ctx, desired, after); err != nil {

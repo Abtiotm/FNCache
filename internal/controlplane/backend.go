@@ -254,7 +254,7 @@ func (b *FirstPassBackend) Verify(ctx context.Context, desired reconcile.Desired
 	if err != nil {
 		return fmt.Errorf("verify scan: %w", err)
 	}
-	return VerifyState(desired, actual)
+	return b.publisher.VerifyState(desired, actual)
 }
 
 func (b *FirstPassBackend) Commit(ctx context.Context, desired reconcile.DesiredState, _ reconcile.ActualState) error {
@@ -262,7 +262,7 @@ func (b *FirstPassBackend) Commit(ctx context.Context, desired reconcile.Desired
 	if err != nil {
 		return fmt.Errorf("commit scan: %w", err)
 	}
-	if err := VerifyState(desired, actual); err != nil {
+	if err := b.publisher.VerifyState(desired, actual); err != nil {
 		return err
 	}
 	if err := b.publisher.checkPublishGuard(ctx); err != nil {
