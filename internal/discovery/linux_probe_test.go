@@ -64,7 +64,58 @@ func TestLinuxProbeReportsMissingCapabilities(t *testing.T) {
 	}
 }
 
+func TestLinuxProbeDetectsPinnedBPFConflict(t *testing.T) {
+	var progArgs, mapArgs []string
+	runner := func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if name == "bpftool" {
+			if hasArg(args, "prog") {
+				progArgs = append([]string(nil), args...)
+				if !hasArg(args, "-f") {
+					return []byte(`[{"id":1}]`), nil
+				}
+				return []byte(`[{"id":1,"pinned":["/sys/fs/bpf/oncache/v1/external_prog"]}]`), nil
+			}
+			if hasArg(args, "map") {
+				mapArgs = append([]string(nil), args...)
+				return []byte(`[]`), nil
+			}
+		}
+		return fakeCommandRunner(ctx, name, args...)
+	}
+	probe, request, cleanup := probeFixtureWithRunner(t, true, true, true, runner)
+	defer cleanup()
+
+	snapshot, err := probe.Probe(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasArg(progArgs, "-f") {
+		t.Fatalf("bpftool program query did not request pinned paths: %v", progArgs)
+	}
+	if !hasArg(mapArgs, "-f") {
+		t.Fatalf("bpftool map query did not request pinned paths: %v", mapArgs)
+	}
+
+	found := false
+	for _, check := range snapshot.Checks {
+		if check.Name != "external/conflicts" {
+			continue
+		}
+		found = true
+		if check.Supported || check.ReasonCode != "EXTERNAL_OBJECT_CONFLICT" {
+			t.Fatalf("expected pinned BPF conflict, got %+v", check)
+		}
+	}
+	if !found {
+		t.Fatal("external conflict check was not reported")
+	}
+}
+
 func probeFixture(t *testing.T, mount, btf, cri bool) (*discovery.LinuxProbe, discovery.PreflightRequest, func()) {
+	return probeFixtureWithRunner(t, mount, btf, cri, fakeCommandRunner)
+}
+
+func probeFixtureWithRunner(t *testing.T, mount, btf, cri bool, runner discovery.CommandRunner) (*discovery.LinuxProbe, discovery.PreflightRequest, func()) {
 	t.Helper()
 	root := t.TempDir()
 	for _, dir := range []string{"proc/sys/kernel", "proc/sys/net/ipv4", "sys/fs/bpf", "sys/kernel/btf", "run"} {
@@ -95,7 +146,7 @@ func probeFixture(t *testing.T, mount, btf, cri bool) (*discovery.LinuxProbe, di
 			_ = listener.Close()
 		}
 	}
-	return discovery.NewLinuxProbeWithRunner(root, fakeCommandRunner), discovery.PreflightRequest{RuntimeURI: "unix:///run/containerd.sock", PinRoot: "/sys/fs/bpf/oncache/v1"}, cleanup
+	return discovery.NewLinuxProbeWithRunner(root, runner), discovery.PreflightRequest{RuntimeURI: "unix:///run/containerd.sock", PinRoot: "/sys/fs/bpf/oncache/v1"}, cleanup
 }
 
 func fakeCommandRunner(_ context.Context, name string, args ...string) ([]byte, error) {
@@ -116,6 +167,15 @@ func fakeCommandRunner(_ context.Context, name string, args ...string) ([]byte, 
 	default:
 		return []byte(""), nil
 	}
+}
+
+func hasArg(args []string, want string) bool {
+	for _, arg := range args {
+		if arg == want {
+			return true
+		}
+	}
+	return false
 }
 
 func writeFile(t *testing.T, path, content string) {

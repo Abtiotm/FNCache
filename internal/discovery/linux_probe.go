@@ -168,12 +168,12 @@ func (p *LinuxProbe) checkExternalConflicts(ctx context.Context, req PreflightRe
 		result.Detail = string(tc)
 		return ProbeCheck{Name: "external/conflicts", ProbeResult: result}
 	}
-	programs, err := p.runCommand(ctx, "bpftool", "-j", "prog", "show")
+	programs, err := p.runCommand(ctx, "bpftool", "-j", "-f", "prog", "show")
 	if err != nil {
 		result.Detail = string(programs)
 		return ProbeCheck{Name: "external/conflicts", ProbeResult: result}
 	}
-	maps, err := p.runCommand(ctx, "bpftool", "-j", "map", "show")
+	maps, err := p.runCommand(ctx, "bpftool", "-j", "-f", "map", "show")
 	if err != nil {
 		result.Detail = string(maps)
 		return ProbeCheck{Name: "external/conflicts", ProbeResult: result}
