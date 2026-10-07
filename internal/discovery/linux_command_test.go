@@ -28,6 +28,9 @@ func TestLinuxConflictParsers(t *testing.T) {
 	if !hasPinnedObject([]byte(`{"pinned":"/sys/fs/bpf/oncache/v1/maps/control_map"}`), "/sys/fs/bpf/oncache/v1") {
 		t.Fatal("pin conflict was not detected")
 	}
+	if hasPinnedObject([]byte(`{"pinned":"/sys/fs/bpf/oncache/v1-other/maps/external_map"}`), "/sys/fs/bpf/oncache/v1") {
+		t.Fatal("sibling pin path was treated as a conflict")
+	}
 	if hasReservedTOSConflict([]byte("-A ONCACHE -j ACCEPT")) || hasFixedTCConflict([]byte("[]")) {
 		t.Fatal("false conflict detected")
 	}
