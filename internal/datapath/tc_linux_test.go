@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cat-cc-Lcos/FNCache/internal/reconcile"
 	"github.com/cat-cc-Lcos/FNCache/internal/resolver"
 )
 
@@ -19,6 +20,7 @@ type fakeTCNetlinkAPI struct {
 	qdiscAdds, filterAdds, filterDeletes int
 	addFailures                          int
 	addErr                               error
+	onListFilters                        func(*fakeTCNetlinkAPI)
 }
 
 func (f *fakeTCNetlinkAPI) listQdiscs(context.Context, resolver.LinkIdentity) ([]kernelQdisc, error) {
@@ -35,6 +37,11 @@ func (f *fakeTCNetlinkAPI) listFilters(_ context.Context, _ resolver.LinkIdentit
 		if filter.Parent == parent {
 			result = append(result, filter)
 		}
+	}
+	if f.onListFilters != nil {
+		onListFilters := f.onListFilters
+		f.onListFilters = nil
+		onListFilters(f)
 	}
 	return result, nil
 }
@@ -223,5 +230,27 @@ func TestLinuxTCBackendListsBothHooksAndDeletesByIdentity(t *testing.T) {
 	spec, _ := NewFixedFilter(link, "tc_init_in", 10, true)
 	if err := backend.RemoveFilter(context.Background(), spec); err != nil || api.filterDeletes != 1 || len(api.filters) != 0 {
 		t.Fatalf("filter was not deleted: err=%v api=%+v", err, api)
+	}
+}
+
+func TestTCManagerRechecksProgramIDAtLinuxBackendBoundary(t *testing.T) {
+	link := linuxTestLink()
+	api := &fakeTCNetlinkAPI{filters: []kernelFilter{{
+		LinkIndex: link.IfIndex, Parent: 0xfffffff2, Priority: FixedTCPriority, Handle: 0x201,
+		Kind: "bpf", Program: "tc_init_in", ProgramID: 10, DirectAction: true,
+	}}}
+	api.onListFilters = func(api *fakeTCNetlinkAPI) {
+		api.filters[0].Program = "foreign"
+		api.filters[0].ProgramID = 99
+	}
+	backend, _ := newLinuxTCBackend(t.TempDir(), api, &fakeTCProgramLoader{})
+	manager, _ := NewTCManager(backend)
+	spec, _ := NewFixedFilter(link, "tc_init_in", 10, true)
+
+	err := manager.RemoveFilter(context.Background(), spec)
+	var classified *reconcile.ClassifiedError
+	if !errors.As(err, &classified) || classified.ReasonCode() != reconcile.ReasonTCForeignConflict ||
+		api.filterDeletes != 0 || len(api.filters) != 1 || api.filters[0].ProgramID != 99 {
+		t.Fatalf("foreign replacement was removed: err=%v api=%+v", err, api)
 	}
 }
