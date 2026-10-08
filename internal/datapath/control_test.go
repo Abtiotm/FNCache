@@ -13,14 +13,15 @@ import (
 )
 
 type fakeControlMap struct {
-	value       ControlV1
-	lookupErr   error
-	updateErr   error
-	closeErr    error
-	updated     ControlV1
-	lookupCalls int
-	updateCalls int
-	closeCalls  int
+	value         ControlV1
+	lookupErr     error
+	updateErr     error
+	closeErr      error
+	updated       ControlV1
+	lookupCalls   int
+	updateCalls   int
+	closeCalls    int
+	updateStarted chan struct{}
 }
 
 func (m *fakeControlMap) Lookup(_ interface{}, value interface{}) error {
@@ -38,6 +39,9 @@ func (m *fakeControlMap) Lookup(_ interface{}, value interface{}) error {
 
 func (m *fakeControlMap) Update(_ interface{}, value interface{}, _ ebpf.MapUpdateFlags) error {
 	m.updateCalls++
+	if m.updateStarted != nil {
+		close(m.updateStarted)
+	}
 	if m.updateErr != nil {
 		return m.updateErr
 	}

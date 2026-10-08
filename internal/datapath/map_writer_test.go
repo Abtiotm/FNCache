@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/cilium/ebpf"
 )
@@ -164,7 +165,8 @@ func TestMapWriterEnsureRequiresVerifiedDisabledControlMap(t *testing.T) {
 
 func TestMapWriterEnsureSerializesWithControlPublish(t *testing.T) {
 	root := t.TempDir()
-	control := &fakeControlMap{value: ControlV1{ABIVersion: controlMapABIVersion}}
+	publishUpdateStarted := make(chan struct{})
+	control := &fakeControlMap{value: ControlV1{ABIVersion: controlMapABIVersion}, updateStarted: publishUpdateStarted}
 	updateStarted := make(chan struct{})
 	updateRelease := make(chan struct{})
 	var releaseOnce sync.Once
@@ -202,7 +204,9 @@ func TestMapWriterEnsureSerializesWithControlPublish(t *testing.T) {
 	select {
 	case err := <-publishDone:
 		t.Fatalf("control publish completed during Map mutation: %v", err)
-	default:
+	case <-publishUpdateStarted:
+		t.Fatal("control Map was updated during Map mutation")
+	case <-time.After(100 * time.Millisecond):
 	}
 
 	release()
