@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/cat-cc-Lcos/FNCache/internal/reconcile"
 	"github.com/cilium/ebpf"
@@ -38,6 +39,17 @@ type controlMap interface {
 }
 
 type controlMapOpener func(string) (controlMap, error)
+
+type controlMapGate struct {
+	mu sync.Mutex
+}
+
+var controlMapGates sync.Map
+
+func controlMapGateFor(pinRoot string) *controlMapGate {
+	gate, _ := controlMapGates.LoadOrStore(filepath.Clean(pinRoot), &controlMapGate{})
+	return gate.(*controlMapGate)
+}
 
 func readControlState(control controlMap) (reconcile.ControlState, error) {
 	key := uint32(0)
@@ -82,7 +94,13 @@ func (w *ControlWriter) Disable(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("open control Map: %w", err)
 	}
+	gate := controlMapGateFor(w.pinRoot)
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
 	defer func() { _ = control.Close() }()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	key := uint32(0)
 	var value ControlV1
@@ -115,7 +133,13 @@ func (w *ControlWriter) Initialize(ctx context.Context) error {
 		}
 		return fmt.Errorf("open control Map: %w", err)
 	}
+	gate := controlMapGateFor(w.pinRoot)
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
 	defer func() { _ = control.Close() }()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	key := uint32(0)
 	var current ControlV1
@@ -148,7 +172,13 @@ func (w *ControlWriter) Publish(ctx context.Context, generation, heartbeatNS, he
 	if err != nil {
 		return fmt.Errorf("open control Map: %w", err)
 	}
+	gate := controlMapGateFor(w.pinRoot)
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
 	defer func() { _ = control.Close() }()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	key := uint32(0)
 	var value ControlV1
@@ -188,7 +218,13 @@ func (w *ControlWriter) RefreshHeartbeat(ctx context.Context, heartbeatNS uint64
 		}
 		return fmt.Errorf("open control Map: %w", err)
 	}
+	gate := controlMapGateFor(w.pinRoot)
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
 	defer func() { _ = control.Close() }()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	key := uint32(0)
 	var value ControlV1

@@ -54,6 +54,20 @@ func (w *MapWriter) Ensure(ctx context.Context, name string, key, value []byte) 
 	if name == "" || filepath.Base(name) != name || len(key) == 0 || len(value) == 0 {
 		return false, fmt.Errorf("invalid Map update input")
 	}
+	control, err := w.openControlMap(ctx)
+	if err != nil {
+		return false, err
+	}
+	gate := controlMapGateFor(w.pinRoot)
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	defer func() { _ = control.Close() }()
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if err := verifyControlDisabled(ctx, control); err != nil {
+		return false, fmt.Errorf("verify control Map before ensuring %s: %w", name, err)
+	}
 	path := filepath.Join(w.pinRoot, "maps", name)
 	object, err := w.open(path)
 	if err != nil {
@@ -72,6 +86,9 @@ func (w *MapWriter) Ensure(ctx context.Context, name string, key, value []byte) 
 		if bytes.Equal(existing, value) {
 			return false, nil
 		}
+	}
+	if err := verifyControlDisabled(ctx, control); err != nil {
+		return false, fmt.Errorf("verify control Map before ensuring %s: %w", name, err)
 	}
 	if err := ctx.Err(); err != nil {
 		return false, err
@@ -93,7 +110,16 @@ func (w *MapWriter) Delete(ctx context.Context, name string, key []byte) (bool, 
 	if err != nil {
 		return false, err
 	}
+	gate := controlMapGateFor(w.pinRoot)
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
 	defer func() { _ = control.Close() }()
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if err := verifyControlDisabled(ctx, control); err != nil {
+		return false, fmt.Errorf("verify control Map before deleting %s: %w", name, err)
+	}
 	object, err := w.open(filepath.Join(w.pinRoot, "maps", name))
 	if err != nil {
 		return false, fmt.Errorf("open pinned Map %s: %w", name, err)
@@ -122,7 +148,16 @@ func (w *MapWriter) Clear(ctx context.Context, name string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	gate := controlMapGateFor(w.pinRoot)
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
 	defer func() { _ = control.Close() }()
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if err := verifyControlDisabled(ctx, control); err != nil {
+		return 0, fmt.Errorf("verify control Map before clearing %s: %w", name, err)
+	}
 	object, err := w.open(filepath.Join(w.pinRoot, "maps", name))
 	if err != nil {
 		return 0, fmt.Errorf("open pinned Map %s: %w", name, err)
