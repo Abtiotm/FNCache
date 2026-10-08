@@ -41,6 +41,8 @@ type DynamicRuntime struct {
 	scanScheduler *ScanScheduler
 }
 
+var ErrKubernetesSnapshotNotReady = errors.New("kubernetes snapshot is not ready")
+
 type datapathComponentFactory func(context.Context, datapathComponentConfig) (*datapathComponents, error)
 
 type dynamicObservationBackend struct {
@@ -124,7 +126,7 @@ func (r *DynamicRuntime) Run(ctx context.Context) error {
 	if err := r.lifecycle.Transition(reconcile.AgentReconciling); err != nil {
 		return err
 	}
-	if err := r.initializeDatapath(ctx); err != nil {
+	if err := r.initializeDatapathWithRetry(ctx); err != nil {
 		if transitionErr := r.lifecycle.Transition(reconcile.AgentDisabled); transitionErr != nil {
 			return errors.Join(err, transitionErr)
 		}
@@ -231,7 +233,7 @@ func (r *DynamicRuntime) Run(ctx context.Context) error {
 	if stoppingRequested && shutdownErr == nil {
 		shutdownErr = errors.Join(shutdownErr, r.disableFastPathForShutdown())
 	}
-	if failureErr != nil && shutdownErr == nil {
+	if failureErr != nil {
 		disableCtx, disableCancel := context.WithTimeout(context.Background(), time.Duration(r.config.Heartbeat.Timeout))
 		disableErr := r.components.control.Disable(disableCtx)
 		disableCancel()
@@ -246,6 +248,31 @@ func (r *DynamicRuntime) Run(ctx context.Context) error {
 		return errors.Join(runErr, stopErr, shutdownErr, closeErr)
 	}
 	return errors.Join(runErr, stopErr, shutdownErr)
+}
+
+func (r *DynamicRuntime) initializeDatapathWithRetry(ctx context.Context) error {
+	for {
+		if err := r.initializeDatapath(ctx); err == nil {
+			return nil
+		} else if delay, retry := initialDatapathRetry(err); !retry {
+			return err
+		} else {
+			timer := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
+		}
+	}
+}
+
+func initialDatapathRetry(err error) (time.Duration, bool) {
+	if errors.Is(err, ErrKubernetesSnapshotNotReady) || errors.Is(err, flannel.ErrDiscoveryNotReady) {
+		return time.Second, true
+	}
+	return 0, false
 }
 
 func (r *DynamicRuntime) disableFastPathForShutdown() error {
@@ -289,14 +316,37 @@ func (r *DynamicRuntime) reconcileInitial(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("create initial reconciliation coordinator: %w", err)
 	}
-	result, err := coordinator.FullReconcile(ctx)
-	if err != nil {
+	for {
+		result, err := coordinator.FullReconcile(ctx)
+		if err == nil {
+			if result.State != reconcile.AgentReady {
+				return fmt.Errorf("initial full reconciliation ended in %s", result.State)
+			}
+			return nil
+		}
+		if delay, retry := initialReconcileRetry(err); retry {
+			timer := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
+			continue
+		}
 		return fmt.Errorf("initial full reconciliation: %w", err)
 	}
-	if result.State != reconcile.AgentReady {
-		return fmt.Errorf("initial full reconciliation ended in %s", result.State)
+}
+
+func initialReconcileRetry(err error) (time.Duration, bool) {
+	var classified *reconcile.ClassifiedError
+	if !errors.As(err, &classified) || classified.Class() != reconcile.ErrorRetryable || classified.ReasonCode() != reconcile.ReasonEndpointNotReady {
+		return 0, false
 	}
-	return nil
+	if classified.RetryAfter() > 0 {
+		return classified.RetryAfter(), true
+	}
+	return time.Second, true
 }
 
 type initialObservationBackend struct {
@@ -353,7 +403,7 @@ func (r *DynamicRuntime) initializeDatapath(ctx context.Context) error {
 	}
 	node, ok := snapshot.Nodes[r.config.NodeName]
 	if !ok || node.Identity.UID == "" {
-		return fmt.Errorf("local Node %q is missing from Snapshot", r.config.NodeName)
+		return fmt.Errorf("%w: local Node %q is missing from Snapshot", ErrKubernetesSnapshotNotReady, r.config.NodeName)
 	}
 	heartbeat, err := monotonicNowNS()
 	if err != nil {

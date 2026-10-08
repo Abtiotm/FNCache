@@ -1,11 +1,14 @@
 package flannel
 
 import (
+	"errors"
 	"fmt"
 	"net/netip"
 
 	"github.com/cat-cc-Lcos/FNCache/internal/resolver"
 )
+
+var ErrDiscoveryNotReady = errors.New("Flannel discovery is not ready")
 
 type FlannelConfig struct {
 	BackendType     string
