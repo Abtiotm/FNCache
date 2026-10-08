@@ -59,7 +59,7 @@ func TestM2OwnershipSurvivesPublisherRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	if state.Generation != desired.Generation || state.InstallationID != "install-a" || state.NodeUID != "node-a" ||
-		state.ABI != reconcile.BPFABIVersion || len(state.Programs) != 4 || len(state.Maps) != len(requiredMaps) || len(state.Endpoints) != 1 {
+		state.ABI != reconcile.BPFABIVersion || len(state.Programs) != 4 || len(state.Maps) != len(datapath.V1Schema().Maps) || len(state.Endpoints) != 1 {
 		t.Fatalf("ownership state did not survive restart: %+v", state)
 	}
 }

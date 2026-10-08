@@ -24,6 +24,7 @@ type datapathComponentConfig struct {
 	HeartbeatNS        uint64
 	HeartbeatTimeoutNS uint64
 	Flags              uint32
+	MapCapacities      datapath.MapCapacities
 	Preflight          discovery.PreflightRequest
 	Flannel            flannel.DiscoveryRequest
 	Marker             flannel.MarkerRuleSpec
@@ -96,6 +97,7 @@ func newDatapathComponents(ctx context.Context, config datapathComponentConfig) 
 	if err := validateDatapathComponentConfig(config); err != nil {
 		return nil, err
 	}
+	schema := datapath.V1SchemaWithCapacities(config.MapCapacities)
 	sandbox, cri, err := resolver.DialContainerdCRI(ctx, config.Preflight.RuntimeURI)
 	if err != nil {
 		return nil, err
@@ -118,7 +120,7 @@ func newDatapathComponents(ctx context.Context, config datapathComponentConfig) 
 	if err != nil {
 		return nil, err
 	}
-	pins, err := datapath.NewPinScanner(config.PinRoot)
+	pins, err := datapath.NewPinScannerWithSchema(config.PinRoot, schema)
 	if err != nil {
 		return nil, err
 	}
@@ -138,7 +140,7 @@ func newDatapathComponents(ctx context.Context, config datapathComponentConfig) 
 	if err != nil {
 		return nil, err
 	}
-	collection, err := controlplane.NewCollectionEnsurer(config.ELFPath, config.PinRoot)
+	collection, err := controlplane.NewCollectionEnsurerWithSchema(config.ELFPath, config.PinRoot, schema)
 	if err != nil {
 		return nil, err
 	}
@@ -158,7 +160,7 @@ func newDatapathComponents(ctx context.Context, config datapathComponentConfig) 
 	if err != nil {
 		return nil, err
 	}
-	maps, err := controlplane.NewMapEnsurer(mapWriter)
+	maps, err := controlplane.NewMapEnsurerWithSchema(mapWriter, schema)
 	if err != nil {
 		return nil, err
 	}
@@ -168,6 +170,7 @@ func newDatapathComponents(ctx context.Context, config datapathComponentConfig) 
 	}
 	publisher, err := controlplane.NewPublisher(store, controlWriter, controlplane.PublishConfig{
 		InstallationID: config.InstallationID, NodeUID: config.Preflight.Node.UID, ELFBuildID: config.ELFBuildID,
+		Schema:      schema,
 		HeartbeatNS: config.HeartbeatNS, HeartbeatTimeoutNS: config.HeartbeatTimeoutNS, Flags: config.Flags,
 	})
 	if err != nil {
@@ -192,6 +195,9 @@ func validateDatapathComponentConfig(config datapathComponentConfig) error {
 	}
 	if config.HeartbeatNS == 0 || config.HeartbeatTimeoutNS == 0 || config.Marker.Chain == "" || config.Marker.Comment == "" {
 		return fmt.Errorf("datapath heartbeat and marker identity are required")
+	}
+	if err := config.MapCapacities.Validate(); err != nil {
+		return err
 	}
 	return nil
 }

@@ -26,6 +26,7 @@ const (
 type Options struct {
 	PinRoot, StatePath, InstallationID string
 	MarkerChain, MarkerComment         string
+	MapCapacities                      datapath.MapCapacities
 }
 
 type Action struct {
@@ -121,6 +122,12 @@ func Run(ctx context.Context, options Options, dryRun bool) (Plan, error) {
 	if options.PinRoot == "" || options.StatePath == "" || options.InstallationID == "" || options.MarkerChain == "" || options.MarkerComment == "" {
 		return Plan{}, fmt.Errorf("cleanup options are incomplete")
 	}
+	if options.MapCapacities == (datapath.MapCapacities{}) {
+		options.MapCapacities = datapath.DefaultMapCapacities()
+	}
+	if err := options.MapCapacities.Validate(); err != nil {
+		return Plan{}, err
+	}
 	store, err := ownership.NewStore(options.StatePath)
 	if err != nil {
 		return Plan{}, err
@@ -132,7 +139,7 @@ func Run(ctx context.Context, options Options, dryRun bool) (Plan, error) {
 	if state.InstallationID != options.InstallationID || state.ABI != reconcile.BPFABIVersion {
 		return Plan{}, fmt.Errorf("ownership identity or BPF ABI does not match cleanup configuration")
 	}
-	pins, err := datapath.NewPinScanner(options.PinRoot)
+	pins, err := datapath.NewPinScannerWithSchema(options.PinRoot, datapath.V1SchemaWithCapacities(options.MapCapacities))
 	if err != nil {
 		return Plan{}, err
 	}

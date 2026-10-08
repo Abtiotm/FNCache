@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"sort"
 
+	"github.com/cat-cc-Lcos/FNCache/internal/datapath"
 	"github.com/cat-cc-Lcos/FNCache/internal/reconcile"
 	"github.com/cat-cc-Lcos/FNCache/internal/resolver"
 )
@@ -16,14 +17,19 @@ type MapStore interface {
 }
 
 type MapEnsurer struct {
-	store MapStore
+	store  MapStore
+	schema datapath.CollectionSchema
 }
 
 func NewMapEnsurer(store MapStore) (*MapEnsurer, error) {
+	return NewMapEnsurerWithSchema(store, datapath.V1Schema())
+}
+
+func NewMapEnsurerWithSchema(store MapStore, schema datapath.CollectionSchema) (*MapEnsurer, error) {
 	if store == nil {
 		return nil, fmt.Errorf("Map store is required")
 	}
-	return &MapEnsurer{store: store}, nil
+	return &MapEnsurer{store: store, schema: schema}, nil
 }
 
 func (e *MapEnsurer) EnsureEndpointMaps(ctx context.Context, desired reconcile.DesiredState, actual reconcile.ActualState, endpoint resolver.Endpoint, fastPathDisabled bool) (bool, error) {
@@ -43,13 +49,13 @@ func (e *MapEnsurer) EnsureEndpointMaps(ctx context.Context, desired reconcile.D
 	if err := endpoint.Validate(); err != nil {
 		return false, fmt.Errorf("validate endpoint: %w", err)
 	}
-	if err := validateMapState(actual, "ingress_cache", 4, 16, 1024); err != nil {
+	if err := validateMapState(actual, e.schema, "ingress_cache"); err != nil {
 		return false, err
 	}
 	if len(endpoint.PeerLink.MAC) != 6 || len(endpoint.HostLink.MAC) != 6 {
 		return false, fmt.Errorf("endpoint MAC identity must contain 6 bytes")
 	}
-	if err := validateDeviceMapInput(desired, actual); err != nil {
+	if err := validateDeviceMapInput(desired, actual, e.schema); err != nil {
 		return false, err
 	}
 
@@ -75,7 +81,7 @@ func (e *MapEnsurer) EnsureDeviceMap(ctx context.Context, desired reconcile.Desi
 	if !fastPathDisabled || !actual.Control.Verified || actual.Control.Enabled {
 		return false, fmt.Errorf("refusing Map update while fast path is enabled or unverified")
 	}
-	if err := validateDeviceMapInput(desired, actual); err != nil {
+	if err := validateDeviceMapInput(desired, actual, e.schema); err != nil {
 		return false, err
 	}
 	return e.ensureDeviceMap(ctx, desired)
@@ -100,7 +106,7 @@ func (e *MapEnsurer) EnsureRemoteMappings(ctx context.Context, desired reconcile
 	if !fastPathDisabled || !actual.Control.Verified || actual.Control.Enabled {
 		return false, fmt.Errorf("refusing remote Map update while fast path is enabled or unverified")
 	}
-	if err := validateMapState(actual, "egressip_cache", 4, 4, 4096); err != nil {
+	if err := validateMapState(actual, e.schema, "egressip_cache"); err != nil {
 		return false, err
 	}
 	addresses := make([]netip.Addr, 0, len(desired.RemoteEndpoints))
@@ -125,19 +131,23 @@ func (e *MapEnsurer) EnsureRemoteMappings(ctx context.Context, desired reconcile
 	return changed, nil
 }
 
-func validateMapState(actual reconcile.ActualState, name string, keySize, valueSize, maxEntries uint32) error {
+func validateMapState(actual reconcile.ActualState, schema datapath.CollectionSchema, name string) error {
 	state, ok := actual.Maps[name]
 	if !ok {
 		return fmt.Errorf("required Map is unavailable: %s", name)
 	}
-	if state.KeySize != keySize || state.ValueSize != valueSize || state.MaxEntries != maxEntries {
-		return fmt.Errorf("Map schema mismatch for %s: got key=%d value=%d max=%d want key=%d value=%d max=%d", name, state.KeySize, state.ValueSize, state.MaxEntries, keySize, valueSize, maxEntries)
+	expected, ok := mapSchema(schema, name)
+	if !ok {
+		return fmt.Errorf("required Map schema is unavailable: %s", name)
+	}
+	if state.KeySize != expected.KeySize || state.ValueSize != expected.ValueSize || state.MaxEntries != expected.MaxEntries {
+		return fmt.Errorf("Map schema mismatch for %s: got key=%d value=%d max=%d want key=%d value=%d max=%d", name, state.KeySize, state.ValueSize, state.MaxEntries, expected.KeySize, expected.ValueSize, expected.MaxEntries)
 	}
 	return nil
 }
 
-func validateDeviceMapInput(desired reconcile.DesiredState, actual reconcile.ActualState) error {
-	if err := validateMapState(actual, "devmap", 4, 12, 8); err != nil {
+func validateDeviceMapInput(desired reconcile.DesiredState, actual reconcile.ActualState, schema datapath.CollectionSchema) error {
+	if err := validateMapState(actual, schema, "devmap"); err != nil {
 		return err
 	}
 	if desired.Flannel.UnderlayLink.IfIndex <= 0 || len(desired.Flannel.UnderlayLink.MAC) != 6 ||
@@ -145,6 +155,15 @@ func validateDeviceMapInput(desired reconcile.DesiredState, actual reconcile.Act
 		return fmt.Errorf("underlay device identity is incomplete")
 	}
 	return nil
+}
+
+func mapSchema(schema datapath.CollectionSchema, name string) (datapath.MapSchema, bool) {
+	for _, expected := range schema.Maps {
+		if expected.Name == name {
+			return expected, true
+		}
+	}
+	return datapath.MapSchema{}, false
 }
 
 func encodeIngressEntry(endpoint resolver.Endpoint) ([]byte, []byte) {

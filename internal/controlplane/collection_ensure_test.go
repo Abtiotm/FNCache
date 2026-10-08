@@ -38,6 +38,35 @@ func TestCollectionEnsurerAcceptsSHA256ProgramTags(t *testing.T) {
 	assertCollectionReadyNoop(t, spec, actual)
 }
 
+func TestCollectionEnsurerUsesConfiguredMapCapacities(t *testing.T) {
+	capacities := datapath.DefaultMapCapacities()
+	capacities.IngressCacheMaxEntries = 2048
+	capacities.DevMapMaxEntries = 16
+	schema := datapath.V1SchemaWithCapacities(capacities)
+	spec := testCollectionSpecWithSchema(schema)
+	actual := readyCollectionStateWithSchema(t, spec, schema, sha1.New)
+	elf := filepath.Join(t.TempDir(), "datapath.o")
+	if err := os.WriteFile(elf, []byte("elf"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ensurer, err := newCollectionEnsurerWithSchema(elf, filepath.Join(t.TempDir(), "bpf"), schema, func(string) (collectionOps, error) {
+		return collectionOps{
+			loadCollection: func(io.ReaderAt, datapath.CollectionSchema) (*ebpf.CollectionSpec, error) {
+				return spec, nil
+			},
+			loadAndPin: func(*ebpf.CollectionSpec, datapath.CollectionSchema) (collectionHandle, error) {
+				return nil, errors.New("configured collection should be ready")
+			},
+		}, nil
+	}, func(context.Context, string) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := ensurer.EnsureCollection(context.Background(), reconcile.DesiredState{Enabled: true}, actual); err != nil || changed {
+		t.Fatalf("configured collection was not treated as ready: changed=%v err=%v", changed, err)
+	}
+}
+
 func TestCollectionEnsurerDoesNotSkipStaleProgram(t *testing.T) {
 	elf := filepath.Join(t.TempDir(), "datapath.o")
 	if err := os.WriteFile(elf, []byte("elf"), 0600); err != nil {
@@ -180,8 +209,11 @@ func readyCollectionState(t *testing.T, spec *ebpf.CollectionSpec) reconcile.Act
 }
 
 func readyCollectionStateWithHash(t *testing.T, spec *ebpf.CollectionSpec, digest func() hash.Hash) reconcile.ActualState {
+	return readyCollectionStateWithSchema(t, spec, datapath.V1Schema(), digest)
+}
+
+func readyCollectionStateWithSchema(t *testing.T, spec *ebpf.CollectionSpec, schema datapath.CollectionSchema, digest func() hash.Hash) reconcile.ActualState {
 	t.Helper()
-	schema := datapath.V1Schema()
 	actual := reconcile.ActualState{Programs: make(map[string]reconcile.ProgramState), Maps: make(map[string]reconcile.MapState)}
 	for _, name := range schema.Programs {
 		program := spec.Programs[name]
@@ -204,7 +236,10 @@ func instructionTag(t *testing.T, instructions asm.Instructions, digest func() h
 }
 
 func testCollectionSpec() *ebpf.CollectionSpec {
-	schema := datapath.V1Schema()
+	return testCollectionSpecWithSchema(datapath.V1Schema())
+}
+
+func testCollectionSpecWithSchema(schema datapath.CollectionSchema) *ebpf.CollectionSpec {
 	spec := &ebpf.CollectionSpec{Programs: make(map[string]*ebpf.ProgramSpec), Maps: make(map[string]*ebpf.MapSpec)}
 	for index, name := range schema.Programs {
 		spec.Programs[name] = &ebpf.ProgramSpec{

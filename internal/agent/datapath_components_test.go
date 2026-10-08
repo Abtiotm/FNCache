@@ -3,6 +3,7 @@ package agent
 import (
 	"testing"
 
+	"github.com/cat-cc-Lcos/FNCache/internal/datapath"
 	"github.com/cat-cc-Lcos/FNCache/internal/discovery"
 	"github.com/cat-cc-Lcos/FNCache/internal/overlay/flannel"
 	"github.com/cat-cc-Lcos/FNCache/internal/resolver"
@@ -12,8 +13,9 @@ func validDatapathComponentConfig() datapathComponentConfig {
 	return datapathComponentConfig{
 		ELFPath: "/opt/oncache/bpf/tc_prog_kern.o", PinRoot: "/sys/fs/bpf/oncache/v1", StatePath: "/var/lib/oncache/v1/state.json",
 		InstallationID: "install-a", ELFBuildID: "sha256:test", HeartbeatNS: 1, HeartbeatTimeoutNS: 5,
-		Preflight: discovery.PreflightRequest{Node: resolver.NodeIdentity{Name: "node-a", UID: "node-1"}, RuntimeURI: "unix:///run/containerd/containerd.sock"},
-		Marker:    flannel.MarkerRuleSpec{Chain: "ONCACHE", Comment: "oncache:install-a"},
+		MapCapacities: datapath.DefaultMapCapacities(),
+		Preflight:     discovery.PreflightRequest{Node: resolver.NodeIdentity{Name: "node-a", UID: "node-1"}, RuntimeURI: "unix:///run/containerd/containerd.sock"},
+		Marker:        flannel.MarkerRuleSpec{Chain: "ONCACHE", Comment: "oncache:install-a"},
 	}
 }
 

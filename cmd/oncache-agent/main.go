@@ -15,6 +15,7 @@ import (
 	"github.com/cat-cc-Lcos/FNCache/internal/agent"
 	"github.com/cat-cc-Lcos/FNCache/internal/cleanup"
 	"github.com/cat-cc-Lcos/FNCache/internal/config"
+	"github.com/cat-cc-Lcos/FNCache/internal/datapath"
 	"github.com/cat-cc-Lcos/FNCache/internal/logging"
 	"github.com/cat-cc-Lcos/FNCache/internal/reconcile"
 	"github.com/cat-cc-Lcos/FNCache/internal/server"
@@ -62,6 +63,11 @@ func runCleanup(path string, dryRun bool) error {
 	plan, runErr := cleanup.Run(context.Background(), cleanup.Options{
 		PinRoot: cfg.PinRoot, StatePath: filepath.Join(cfg.StateDir, "state.json"), InstallationID: cfg.InstallationID,
 		MarkerChain: cfg.Markers.Chain, MarkerComment: cfg.Markers.Comment,
+		MapCapacities: datapath.MapCapacities{
+			IngressCacheMaxEntries: cfg.Maps.IngressCacheMaxEntries, EgressIPCacheMaxEntries: cfg.Maps.EgressIPCacheMaxEntries,
+			EgressCacheMaxEntries: cfg.Maps.EgressCacheMaxEntries, PolicyCacheMaxEntries: cfg.Maps.PolicyCacheMaxEntries,
+			DevMapMaxEntries: cfg.Maps.DevMapMaxEntries,
+		},
 	}, dryRun)
 	data, marshalErr := json.MarshalIndent(plan, "", "  ")
 	if marshalErr == nil {

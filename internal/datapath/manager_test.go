@@ -15,6 +15,27 @@ func TestValidateV1CollectionSpec(t *testing.T) {
 	}
 }
 
+func TestApplyConfiguredMapCapacitiesBeforeValidation(t *testing.T) {
+	capacities := DefaultMapCapacities()
+	capacities.IngressCacheMaxEntries = 2048
+	capacities.EgressIPCacheMaxEntries = 8192
+	capacities.EgressCacheMaxEntries = 2048
+	capacities.PolicyCacheMaxEntries = 8192
+	capacities.DevMapMaxEntries = 16
+	schema := V1SchemaWithCapacities(capacities)
+	spec := collectionFor(V1Schema())
+
+	if err := applyConfiguredMapCapacities(spec, schema); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateCollectionSpec(spec, schema); err != nil {
+		t.Fatalf("configured capacities were not applied: %v", err)
+	}
+	if spec.Maps["control_map"].MaxEntries != 1 || spec.Maps["stats_map"].MaxEntries != 14 {
+		t.Fatalf("fixed Map capacities changed: control=%d stats=%d", spec.Maps["control_map"].MaxEntries, spec.Maps["stats_map"].MaxEntries)
+	}
+}
+
 func TestValidateRejectsMapSchemaMismatch(t *testing.T) {
 	schema := V1Schema()
 	spec := collectionFor(schema)

@@ -57,7 +57,7 @@ func NewStaticRuntime(ctx context.Context, config StaticRuntimeConfig) (*StaticR
 	components, err := newDatapathComponents(ctx, datapathComponentConfig{
 		ELFPath: config.ELFPath, PinRoot: config.PinRoot, StatePath: config.StatePath, InstallationID: config.InstallationID,
 		ELFBuildID: config.ELFBuildID, HeartbeatNS: config.HeartbeatNS, HeartbeatTimeoutNS: config.HeartbeatTimeoutNS,
-		Flags: config.Flags, Preflight: config.Preflight, Flannel: config.Flannel, Marker: config.Marker,
+		Flags: config.Flags, MapCapacities: datapath.DefaultMapCapacities(), Preflight: config.Preflight, Flannel: config.Flannel, Marker: config.Marker,
 	})
 	if err != nil {
 		return nil, err

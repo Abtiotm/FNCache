@@ -29,12 +29,17 @@ type controlInitializer func(context.Context, string) error
 type CollectionEnsurer struct {
 	elfPath       string
 	pinRoot       string
+	schema        datapath.CollectionSchema
 	newOps        collectionOpsFactory
 	initializeCtl controlInitializer
 }
 
 func NewCollectionEnsurer(elfPath, pinRoot string) (*CollectionEnsurer, error) {
-	return newCollectionEnsurer(elfPath, pinRoot, func(root string) (collectionOps, error) {
+	return NewCollectionEnsurerWithSchema(elfPath, pinRoot, datapath.V1Schema())
+}
+
+func NewCollectionEnsurerWithSchema(elfPath, pinRoot string, schema datapath.CollectionSchema) (*CollectionEnsurer, error) {
+	return newCollectionEnsurerWithSchema(elfPath, pinRoot, schema, func(root string) (collectionOps, error) {
 		manager, err := datapath.NewManager(root)
 		if err != nil {
 			return collectionOps{}, err
@@ -50,6 +55,10 @@ func NewCollectionEnsurer(elfPath, pinRoot string) (*CollectionEnsurer, error) {
 }
 
 func newCollectionEnsurer(elfPath, pinRoot string, factory collectionOpsFactory, initialize controlInitializer) (*CollectionEnsurer, error) {
+	return newCollectionEnsurerWithSchema(elfPath, pinRoot, datapath.V1Schema(), factory, initialize)
+}
+
+func newCollectionEnsurerWithSchema(elfPath, pinRoot string, schema datapath.CollectionSchema, factory collectionOpsFactory, initialize controlInitializer) (*CollectionEnsurer, error) {
 	if elfPath == "" || !filepath.IsAbs(elfPath) {
 		return nil, fmt.Errorf("BPF ELF path must be an absolute file path")
 	}
@@ -59,7 +68,7 @@ func newCollectionEnsurer(elfPath, pinRoot string, factory collectionOpsFactory,
 	if factory == nil || initialize == nil {
 		return nil, fmt.Errorf("collection dependencies are required")
 	}
-	return &CollectionEnsurer{elfPath: filepath.Clean(elfPath), pinRoot: filepath.Clean(pinRoot), newOps: factory, initializeCtl: initialize}, nil
+	return &CollectionEnsurer{elfPath: filepath.Clean(elfPath), pinRoot: filepath.Clean(pinRoot), schema: schema, newOps: factory, initializeCtl: initialize}, nil
 }
 
 func (e *CollectionEnsurer) EnsureCollection(ctx context.Context, desired reconcile.DesiredState, actual reconcile.ActualState) (bool, error) {
@@ -78,8 +87,7 @@ func (e *CollectionEnsurer) EnsureCollection(ctx context.Context, desired reconc
 	if err != nil {
 		return false, fmt.Errorf("create BPF collection manager: %w", err)
 	}
-	schema := datapath.V1Schema()
-	if partialCollection(actual, schema) {
+	if partialCollection(actual, e.schema) {
 		if ops.ensureControl == nil {
 			return false, fmt.Errorf("partial BPF collection repair is unavailable")
 		}
@@ -91,14 +99,14 @@ func (e *CollectionEnsurer) EnsureCollection(ctx context.Context, desired reconc
 		}
 		return true, nil
 	}
-	spec, err := ops.loadCollection(file, schema)
+	spec, err := ops.loadCollection(file, e.schema)
 	if err != nil {
 		return false, fmt.Errorf("load BPF collection: %w", err)
 	}
-	if collectionReady(actual, spec) {
+	if collectionReadyWithSchema(actual, spec, e.schema) {
 		return false, nil
 	}
-	loaded, err := ops.loadAndPin(spec, schema)
+	loaded, err := ops.loadAndPin(spec, e.schema)
 	if err != nil {
 		return false, fmt.Errorf("pin BPF collection: %w", err)
 	}
@@ -126,10 +134,13 @@ func partialCollection(actual reconcile.ActualState, schema datapath.CollectionS
 }
 
 func collectionReady(actual reconcile.ActualState, spec *ebpf.CollectionSpec) bool {
+	return collectionReadyWithSchema(actual, spec, datapath.V1Schema())
+}
+
+func collectionReadyWithSchema(actual reconcile.ActualState, spec *ebpf.CollectionSpec, schema datapath.CollectionSchema) bool {
 	if spec == nil {
 		return false
 	}
-	schema := datapath.V1Schema()
 	if len(actual.Programs) != len(schema.Programs) || len(actual.Maps) != len(schema.Maps) {
 		return false
 	}
