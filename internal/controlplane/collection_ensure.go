@@ -20,6 +20,7 @@ type collectionHandle interface {
 type collectionOps struct {
 	loadCollection func(io.ReaderAt, datapath.CollectionSchema) (*ebpf.CollectionSpec, error)
 	loadAndPin     func(*ebpf.CollectionSpec, datapath.CollectionSchema) (collectionHandle, error)
+	ensureControl  func(context.Context) error
 }
 
 type collectionOpsFactory func(string) (collectionOps, error)
@@ -48,6 +49,7 @@ func NewCollectionEnsurerWithSchema(elfPath, pinRoot string, schema datapath.Col
 			loadAndPin: func(spec *ebpf.CollectionSpec, schema datapath.CollectionSchema) (collectionHandle, error) {
 				return manager.LoadAndPin(spec, schema)
 			},
+			ensureControl: manager.EnsureControlMap,
 		}, nil
 	}, initializeControlMap)
 }
@@ -85,6 +87,18 @@ func (e *CollectionEnsurer) EnsureCollection(ctx context.Context, desired reconc
 	if err != nil {
 		return false, fmt.Errorf("create BPF collection manager: %w", err)
 	}
+	if partialCollection(actual, e.schema) {
+		if ops.ensureControl == nil {
+			return false, fmt.Errorf("partial BPF collection repair is unavailable")
+		}
+		if err := ops.ensureControl(ctx); err != nil {
+			return false, fmt.Errorf("recreate control Map: %w", err)
+		}
+		if err := e.initializeCtl(ctx, e.pinRoot); err != nil {
+			return false, fmt.Errorf("initialize control Map: %w", err)
+		}
+		return true, nil
+	}
 	spec, err := ops.loadCollection(file, e.schema)
 	if err != nil {
 		return false, fmt.Errorf("load BPF collection: %w", err)
@@ -105,6 +119,18 @@ func (e *CollectionEnsurer) EnsureCollection(ctx context.Context, desired reconc
 		return false, fmt.Errorf("close BPF collection: %w", err)
 	}
 	return true, nil
+}
+
+func partialCollection(actual reconcile.ActualState, schema datapath.CollectionSchema) bool {
+	if _, ok := actual.Maps["control_map"]; ok || len(actual.Maps) != len(schema.Maps)-1 || len(actual.Programs) != len(schema.Programs) {
+		return false
+	}
+	for _, name := range schema.Programs {
+		if program, ok := actual.Programs[name]; !ok || program.ID == 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func collectionReady(actual reconcile.ActualState, spec *ebpf.CollectionSpec) bool {

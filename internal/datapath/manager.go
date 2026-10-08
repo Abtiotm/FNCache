@@ -118,6 +118,36 @@ func (m *Manager) RemovePinnedProgram(ctx context.Context, name string, expected
 	return removePinnedProgram(ctx, path, name, expectedID)
 }
 
+func (m *Manager) EnsureControlMap(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	path, err := m.MapPinPath("control_map")
+	if err != nil {
+		return err
+	}
+	descriptor, exists, err := m.loader.InspectMap(path)
+	if err != nil {
+		return fmt.Errorf("inspect control Map: %w", err)
+	}
+	expected := MapSchema{Name: "control_map", Type: ebpf.Array, KeySize: 4, ValueSize: 40, MaxEntries: 1, Flags: 0}
+	if exists {
+		return validateDescriptor(descriptor, expected)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return fmt.Errorf("create control Map directory: %w", err)
+	}
+	object, err := ebpf.NewMap(&ebpf.MapSpec{Name: expected.Name, Type: expected.Type, KeySize: expected.KeySize, ValueSize: expected.ValueSize, MaxEntries: expected.MaxEntries, Flags: expected.Flags})
+	if err != nil {
+		return fmt.Errorf("create control Map: %w", err)
+	}
+	defer object.Close()
+	if err := object.Pin(path); err != nil {
+		return fmt.Errorf("pin control Map: %w", err)
+	}
+	return nil
+}
+
 func removePinnedMap(ctx context.Context, path, name string, expectedID uint32) error {
 	if err := ctx.Err(); err != nil {
 		return err

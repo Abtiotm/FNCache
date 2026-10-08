@@ -81,11 +81,14 @@ func (d *Discovery) Discover(ctx context.Context, req DiscoveryRequest) (Flannel
 		}
 	}
 	if underlayName == "" {
-		return FlannelConfig{}, fmt.Errorf("Flannel underlay device is missing")
+		return FlannelConfig{}, fmt.Errorf("%w: Flannel underlay device is missing", ErrDiscoveryNotReady)
 	}
 	var underlay []linkJSON
 	if err := d.readJSON(ctx, &underlay, "-j", "link", "show", "dev", underlayName); err != nil {
 		return FlannelConfig{}, err
+	}
+	if len(underlay) == 0 {
+		return FlannelConfig{}, fmt.Errorf("%w: underlay device %q is missing", ErrDiscoveryNotReady, underlayName)
 	}
 	if len(underlay) != 1 {
 		return FlannelConfig{}, fmt.Errorf("underlay device %q is not unique", underlayName)
@@ -128,7 +131,7 @@ func (d *Discovery) Discover(ctx context.Context, req DiscoveryRequest) (Flannel
 func (d *Discovery) readJSON(ctx context.Context, target any, args ...string) error {
 	output, err := d.run(ctx, "ip", args...)
 	if err != nil {
-		return fmt.Errorf("ip %s: %w", strings.Join(args, " "), err)
+		return fmt.Errorf("%w: ip %s: %v", ErrDiscoveryNotReady, strings.Join(args, " "), err)
 	}
 	if err := json.Unmarshal(output, target); err != nil {
 		return fmt.Errorf("decode ip %s: %w", strings.Join(args, " "), err)
@@ -155,7 +158,7 @@ func firstIPv4(groups []addrJSON) (netip.Addr, error) {
 			}
 		}
 	}
-	return netip.Addr{}, fmt.Errorf("underlay IPv4 address is missing")
+	return netip.Addr{}, fmt.Errorf("%w: underlay IPv4 address is missing", ErrDiscoveryNotReady)
 }
 
 func firstPodCIDR(routes []routeJSON, device string) (netip.Prefix, error) {
@@ -167,7 +170,7 @@ func firstPodCIDR(routes []routeJSON, device string) (netip.Prefix, error) {
 			}
 		}
 	}
-	return netip.Prefix{}, fmt.Errorf("PodCIDR route for %s is missing", device)
+	return netip.Prefix{}, fmt.Errorf("%w: PodCIDR route for %s is missing", ErrDiscoveryNotReady, device)
 }
 
 func fingerprint(c FlannelConfig) string {

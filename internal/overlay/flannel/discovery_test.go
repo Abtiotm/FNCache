@@ -2,6 +2,7 @@ package flannel
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 )
@@ -85,5 +86,12 @@ func TestDiscoverAcceptsFilteredRouteWithoutDeviceField(t *testing.T) {
 	d := NewDiscovery(fixture{kind: "vxlan", vni: 1, port: 8472, route: "pod-no-dev"}.run)
 	if _, err := d.Discover(context.Background(), DiscoveryRequest{}); err != nil {
 		t.Fatalf("filtered route without dev field was rejected: %v", err)
+	}
+}
+
+func TestDiscoverMarksMissingPodCIDRAsNotReady(t *testing.T) {
+	_, err := NewDiscovery(fixture{kind: "vxlan", vni: 1, port: 8472}.run).Discover(context.Background(), DiscoveryRequest{})
+	if !errors.Is(err, ErrDiscoveryNotReady) {
+		t.Fatalf("error = %v, want ErrDiscoveryNotReady", err)
 	}
 }

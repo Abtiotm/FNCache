@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -141,6 +142,33 @@ func (c *dynamicRuntimeHeartbeatControl) HeartbeatCount() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return len(c.heartbeats)
+}
+
+func TestInitialReconcileRetryOnlyCoversEndpointNotReady(t *testing.T) {
+	endpointErr := reconcile.NewClassifiedError(reconcile.ErrorRetryable, reconcile.ReasonEndpointNotReady, 2*time.Second, errors.New("sandbox pending"))
+	if delay, retry := initialReconcileRetry(endpointErr); !retry || delay != 2*time.Second {
+		t.Fatalf("endpoint-not-ready error = delay %s retry %t, want 2s/true", delay, retry)
+	}
+	otherErr := reconcile.NewClassifiedError(reconcile.ErrorRetryable, reconcile.ReasonFlannelLinkMissing, 2*time.Second, errors.New("link missing"))
+	if delay, retry := initialReconcileRetry(otherErr); retry || delay != 0 {
+		t.Fatalf("other retryable error = delay %s retry %t, want 0/false", delay, retry)
+	}
+}
+
+func TestInitialDatapathRetryCoversTransientDependencies(t *testing.T) {
+	for name, err := range map[string]error{
+		"snapshot": fmt.Errorf("bootstrap: %w", ErrKubernetesSnapshotNotReady),
+		"flannel":  fmt.Errorf("baseline: %w", flannel.ErrDiscoveryNotReady),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if delay, retry := initialDatapathRetry(err); !retry || delay != time.Second {
+				t.Fatalf("retry = %t after %s, want true after 1s", retry, delay)
+			}
+		})
+	}
+	if delay, retry := initialDatapathRetry(errors.New("invalid configuration")); retry || delay != 0 {
+		t.Fatalf("fatal error retry = %t after %s, want false/0", retry, delay)
+	}
 }
 
 func dynamicRuntimePublisher(t *testing.T, published *atomic.Bool) *controlplane.Publisher {

@@ -178,6 +178,32 @@ func assertCollectionReadyNoop(t *testing.T, spec *ebpf.CollectionSpec, actual r
 	}
 }
 
+func TestCollectionEnsurerRepairsMissingControlPin(t *testing.T) {
+	elf := filepath.Join(t.TempDir(), "datapath.o")
+	if err := os.WriteFile(elf, []byte("elf"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ensured := false
+	loaded := &fakeCollectionHandle{}
+	ensurer, err := newCollectionEnsurer(elf, filepath.Join(t.TempDir(), "bpf"), func(string) (collectionOps, error) {
+		return collectionOps{
+			loadCollection: func(io.ReaderAt, datapath.CollectionSchema) (*ebpf.CollectionSpec, error) {
+				return &ebpf.CollectionSpec{}, nil
+			},
+			ensureControl: func(context.Context) error { ensured = true; return nil },
+			loadAndPin:    func(*ebpf.CollectionSpec, datapath.CollectionSchema) (collectionHandle, error) { return loaded, nil },
+		}, nil
+	}, func(context.Context, string) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual := readyCollectionState(t, testCollectionSpec())
+	delete(actual.Maps, "control_map")
+	if changed, err := ensurer.EnsureCollection(context.Background(), reconcile.DesiredState{Enabled: true}, actual); err != nil || !changed || !ensured || loaded.closeCalls != 0 {
+		t.Fatalf("partial collection was not repaired: changed=%v err=%v ensured=%v handle=%+v", changed, err, ensured, loaded)
+	}
+}
+
 func readyCollectionState(t *testing.T, spec *ebpf.CollectionSpec) reconcile.ActualState {
 	return readyCollectionStateWithHash(t, spec, sha1.New)
 }

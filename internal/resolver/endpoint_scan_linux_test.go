@@ -49,10 +49,14 @@ func TestEndpointScannerIgnoresDeletingAndHostNetworkPods(t *testing.T) {
 	deleting.Deleting = true
 	hostNetwork := scanPod("pod-host", "1")
 	hostNetwork.HostNetwork = true
+	succeeded := scanPod("pod-succeeded", "1")
+	succeeded.Phase = "Succeeded"
+	failed := scanPod("pod-failed", "1")
+	failed.Phase = "Failed"
 	fake := &fakeEndpointResolver{endpoints: map[string]Endpoint{}, errors: map[string]error{}}
 	scanner, _ := NewEndpointScanner(fake)
 
-	result, err := scanner.Scan(context.Background(), []PodSnapshot{deleting, hostNetwork})
+	result, err := scanner.Scan(context.Background(), []PodSnapshot{deleting, hostNetwork, succeeded, failed})
 	if err != nil || len(result.Endpoints) != 0 || len(result.Skipped) != 0 || fake.calls != 0 {
 		t.Fatalf("ignored endpoint candidates were resolved: result=%+v err=%v calls=%d", result, err, fake.calls)
 	}

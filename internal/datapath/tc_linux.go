@@ -216,6 +216,24 @@ func (b *linuxTCBackend) RemoveFilter(ctx context.Context, spec TCFilterSpec) er
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	filters, err := b.ListFilters(ctx, spec.Link)
+	if err != nil {
+		return fmt.Errorf("recheck TC filters before deletion: %w", err)
+	}
+	found := false
+	for _, current := range filters {
+		if current.Hook != spec.Hook || current.Priority != spec.Priority || current.Handle != spec.Handle {
+			continue
+		}
+		if !sameFilter(current, spec) {
+			return foreignConflict("refusing to remove a filter with a different program identity")
+		}
+		found = true
+		break
+	}
+	if !found {
+		return nil
+	}
 	parent, err := parentForHook(spec.Hook)
 	if err != nil {
 		return err
