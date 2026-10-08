@@ -2,7 +2,12 @@ package controlplane
 
 import (
 	"context"
+	"crypto/sha1"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
+	"hash"
 	"io"
 	"os"
 	"path/filepath"
@@ -11,6 +16,7 @@ import (
 	"github.com/cat-cc-Lcos/FNCache/internal/datapath"
 	"github.com/cat-cc-Lcos/FNCache/internal/reconcile"
 	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/asm"
 )
 
 type fakeCollectionHandle struct {
@@ -22,16 +28,44 @@ func (h *fakeCollectionHandle) Unpin() error { h.unpinCalls++; return nil }
 func (h *fakeCollectionHandle) Close() error { h.closeCalls++; return nil }
 
 func TestCollectionEnsurerSkipsReadyCollection(t *testing.T) {
-	called := false
-	ensurer, err := newCollectionEnsurer("/tmp/oncache-test.o", "/sys/fs/bpf/oncache/v1", func(string) (collectionOps, error) {
-		called = true
-		return collectionOps{}, nil
+	spec := testCollectionSpec()
+	assertCollectionReadyNoop(t, spec, readyCollectionState(t, spec))
+}
+
+func TestCollectionEnsurerAcceptsSHA256ProgramTags(t *testing.T) {
+	spec := testCollectionSpec()
+	actual := readyCollectionStateWithHash(t, spec, sha256.New)
+	assertCollectionReadyNoop(t, spec, actual)
+}
+
+func TestCollectionEnsurerDoesNotSkipStaleProgram(t *testing.T) {
+	elf := filepath.Join(t.TempDir(), "datapath.o")
+	if err := os.WriteFile(elf, []byte("elf"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	spec := testCollectionSpec()
+	handle := &fakeCollectionHandle{}
+	loaded := false
+	ensurer, err := newCollectionEnsurer(elf, filepath.Join(t.TempDir(), "bpf"), func(string) (collectionOps, error) {
+		return collectionOps{
+			loadCollection: func(io.ReaderAt, datapath.CollectionSchema) (*ebpf.CollectionSpec, error) {
+				return spec, nil
+			},
+			loadAndPin: func(*ebpf.CollectionSpec, datapath.CollectionSchema) (collectionHandle, error) {
+				loaded = true
+				return handle, nil
+			},
+		}, nil
 	}, func(context.Context, string) error { return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
-	if changed, err := ensurer.EnsureCollection(context.Background(), reconcile.DesiredState{Enabled: true}, readyCollectionState()); err != nil || changed || called {
-		t.Fatalf("ready collection was not a no-op: changed=%v err=%v called=%v", changed, err, called)
+	actual := readyCollectionState(t, spec)
+	staleProgram := actual.Programs["tc_masq"]
+	staleProgram.Tag = "stale-program-tag"
+	actual.Programs["tc_masq"] = staleProgram
+	if changed, err := ensurer.EnsureCollection(context.Background(), reconcile.DesiredState{Enabled: true}, actual); err != nil || !changed || !loaded || handle.closeCalls != 1 {
+		t.Fatalf("stale program was incorrectly treated as ready: changed=%v err=%v loaded=%v handle=%+v", changed, err, loaded, handle)
 	}
 }
 
@@ -89,6 +123,32 @@ func TestCollectionEnsurerRollsBackWhenControlInitializationFails(t *testing.T) 
 	}
 }
 
+func assertCollectionReadyNoop(t *testing.T, spec *ebpf.CollectionSpec, actual reconcile.ActualState) {
+	t.Helper()
+	elf := filepath.Join(t.TempDir(), "datapath.o")
+	if err := os.WriteFile(elf, []byte("elf"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	loaded := false
+	ensurer, err := newCollectionEnsurer(elf, "/sys/fs/bpf/oncache/v1", func(string) (collectionOps, error) {
+		return collectionOps{
+			loadCollection: func(io.ReaderAt, datapath.CollectionSchema) (*ebpf.CollectionSpec, error) {
+				return spec, nil
+			},
+			loadAndPin: func(*ebpf.CollectionSpec, datapath.CollectionSchema) (collectionHandle, error) {
+				loaded = true
+				return nil, errors.New("ready collection should not be loaded")
+			},
+		}, nil
+	}, func(context.Context, string) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := ensurer.EnsureCollection(context.Background(), reconcile.DesiredState{Enabled: true}, actual); err != nil || changed || loaded {
+		t.Fatalf("ready collection was not a no-op: changed=%v err=%v loaded=%v", changed, err, loaded)
+	}
+}
+
 func TestCollectionEnsurerRepairsMissingControlPin(t *testing.T) {
 	elf := filepath.Join(t.TempDir(), "datapath.o")
 	if err := os.WriteFile(elf, []byte("elf"), 0600); err != nil {
@@ -108,21 +168,55 @@ func TestCollectionEnsurerRepairsMissingControlPin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	actual := readyCollectionState()
+	actual := readyCollectionState(t, testCollectionSpec())
 	delete(actual.Maps, "control_map")
 	if changed, err := ensurer.EnsureCollection(context.Background(), reconcile.DesiredState{Enabled: true}, actual); err != nil || !changed || !ensured || loaded.closeCalls != 0 {
 		t.Fatalf("partial collection was not repaired: changed=%v err=%v ensured=%v handle=%+v", changed, err, ensured, loaded)
 	}
 }
 
-func readyCollectionState() reconcile.ActualState {
+func readyCollectionState(t *testing.T, spec *ebpf.CollectionSpec) reconcile.ActualState {
+	return readyCollectionStateWithHash(t, spec, sha1.New)
+}
+
+func readyCollectionStateWithHash(t *testing.T, spec *ebpf.CollectionSpec, digest func() hash.Hash) reconcile.ActualState {
+	t.Helper()
 	schema := datapath.V1Schema()
 	actual := reconcile.ActualState{Programs: make(map[string]reconcile.ProgramState), Maps: make(map[string]reconcile.MapState)}
 	for _, name := range schema.Programs {
-		actual.Programs[name] = reconcile.ProgramState{ID: 1, Name: name}
+		program := spec.Programs[name]
+		tag := instructionTag(t, program.Instructions, digest)
+		actual.Programs[name] = reconcile.ProgramState{ID: 1, Name: name, Tag: tag}
 	}
 	for _, expected := range schema.Maps {
 		actual.Maps[expected.Name] = reconcile.MapState{ID: 1, Name: expected.Name, KeySize: expected.KeySize, ValueSize: expected.ValueSize, MaxEntries: expected.MaxEntries}
 	}
 	return actual
+}
+
+func instructionTag(t *testing.T, instructions asm.Instructions, digest func() hash.Hash) string {
+	t.Helper()
+	h := digest()
+	if err := instructions.Marshal(h, binary.LittleEndian); err != nil {
+		t.Fatalf("marshal instructions for tag: %v", err)
+	}
+	return hex.EncodeToString(h.Sum(nil)[:8])
+}
+
+func testCollectionSpec() *ebpf.CollectionSpec {
+	schema := datapath.V1Schema()
+	spec := &ebpf.CollectionSpec{Programs: make(map[string]*ebpf.ProgramSpec), Maps: make(map[string]*ebpf.MapSpec)}
+	for index, name := range schema.Programs {
+		spec.Programs[name] = &ebpf.ProgramSpec{
+			Name:         name,
+			Instructions: asm.Instructions{asm.LoadImm(asm.R0, int64(index), asm.DWord), asm.Return()},
+		}
+	}
+	for _, expected := range schema.Maps {
+		spec.Maps[expected.Name] = &ebpf.MapSpec{
+			Name: expected.Name, Type: expected.Type, KeySize: expected.KeySize,
+			ValueSize: expected.ValueSize, MaxEntries: expected.MaxEntries, Flags: expected.Flags,
+		}
+	}
+	return spec
 }

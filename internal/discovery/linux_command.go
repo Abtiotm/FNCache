@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -85,5 +86,11 @@ func hasFixedTCConflict(output []byte) bool {
 }
 
 func hasPinnedObject(output []byte, pinRoot string) bool {
-	return pinRoot != "" && strings.Contains(string(output), pinRoot)
+	if pinRoot == "" {
+		return false
+	}
+	root := filepath.Clean(pinRoot)
+	text := string(output)
+	return strings.Contains(text, `"`+root+`"`) ||
+		strings.Contains(text, `"`+root+string(filepath.Separator))
 }
