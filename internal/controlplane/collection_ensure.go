@@ -21,6 +21,7 @@ type collectionOps struct {
 	loadCollection func(io.ReaderAt, datapath.CollectionSchema) (*ebpf.CollectionSpec, error)
 	loadAndPin     func(*ebpf.CollectionSpec, datapath.CollectionSchema) (collectionHandle, error)
 	ensureControl  func(context.Context) error
+	removeProgram  func(context.Context, string, uint32) error
 }
 
 type collectionOpsFactory func(string) (collectionOps, error)
@@ -50,6 +51,7 @@ func NewCollectionEnsurerWithSchema(elfPath, pinRoot string, schema datapath.Col
 				return manager.LoadAndPin(spec, schema)
 			},
 			ensureControl: manager.EnsureControlMap,
+			removeProgram: manager.RemovePinnedProgram,
 		}, nil
 	}, initializeControlMap)
 }
@@ -103,6 +105,9 @@ func (e *CollectionEnsurer) EnsureCollection(ctx context.Context, desired reconc
 	if err != nil {
 		return false, fmt.Errorf("load BPF collection: %w", err)
 	}
+	if err := e.recoverPartialProgramPins(ctx, ops, actual, spec); err != nil {
+		return false, fmt.Errorf("recover partial BPF program pins: %w", err)
+	}
 	if collectionReadyWithSchema(actual, spec, e.schema) {
 		return false, nil
 	}
@@ -119,6 +124,85 @@ func (e *CollectionEnsurer) EnsureCollection(ctx context.Context, desired reconc
 		return false, fmt.Errorf("close BPF collection: %w", err)
 	}
 	return true, nil
+}
+
+func (e *CollectionEnsurer) recoverPartialProgramPins(ctx context.Context, ops collectionOps, actual reconcile.ActualState, spec *ebpf.CollectionSpec) error {
+	if !partialProgramCollection(actual, e.schema) {
+		return nil
+	}
+	if spec == nil {
+		return fmt.Errorf("BPF collection spec is nil")
+	}
+	if !actual.Control.Verified || actual.Control.Enabled {
+		return fmt.Errorf("control Map is not verified and disabled")
+	}
+	if len(actual.Attachments) != 0 {
+		return fmt.Errorf("partial collection has %d TC attachments", len(actual.Attachments))
+	}
+	if len(actual.Conflicts) != 0 {
+		return fmt.Errorf("partial collection has %d TC conflicts", len(actual.Conflicts))
+	}
+	if ops.removeProgram == nil {
+		return fmt.Errorf("partial program pin recovery is unavailable")
+	}
+	for _, name := range e.schema.Programs {
+		program, ok := actual.Programs[name]
+		if !ok {
+			continue
+		}
+		expected, ok := spec.Programs[name]
+		if !ok || !programMatchesSpec(name, program, expected) {
+			return fmt.Errorf("program %s does not match the current ELF", name)
+		}
+	}
+	for _, name := range e.schema.Programs {
+		program, ok := actual.Programs[name]
+		if !ok {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := ops.removeProgram(ctx, name, program.ID); err != nil {
+			return fmt.Errorf("remove program pin %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
+func partialProgramCollection(actual reconcile.ActualState, schema datapath.CollectionSchema) bool {
+	if len(actual.Programs) == 0 || len(actual.Programs) >= len(schema.Programs) || len(actual.Maps) != len(schema.Maps) {
+		return false
+	}
+	if _, ok := actual.Maps["control_map"]; !ok {
+		return false
+	}
+	for _, orphan := range actual.Orphans {
+		if orphan.Kind == "program-pin" {
+			return false
+		}
+	}
+	for _, expected := range schema.Maps {
+		state, ok := actual.Maps[expected.Name]
+		if !ok || state.ID == 0 || state.KeySize != expected.KeySize || state.ValueSize != expected.ValueSize || state.MaxEntries != expected.MaxEntries {
+			return false
+		}
+	}
+	for name, program := range actual.Programs {
+		if program.ID == 0 || !containsProgram(schema.Programs, name) {
+			return false
+		}
+	}
+	return true
+}
+
+func containsProgram(programs []string, name string) bool {
+	for _, expected := range programs {
+		if expected == name {
+			return true
+		}
+	}
+	return false
 }
 
 func partialCollection(actual reconcile.ActualState, schema datapath.CollectionSchema) bool {
@@ -147,13 +231,7 @@ func collectionReadyWithSchema(actual reconcile.ActualState, spec *ebpf.Collecti
 	for _, name := range schema.Programs {
 		program, ok := actual.Programs[name]
 		expected, expectedOK := spec.Programs[name]
-		if !ok || program.ID == 0 || !expectedOK || expected == nil {
-			return false
-		}
-		if program.Name != "" && program.Name != name {
-			return false
-		}
-		if err := expected.Compatible(&ebpf.ProgramInfo{Tag: program.Tag}); err != nil {
+		if !ok || !expectedOK || !programMatchesSpec(name, program, expected) {
 			return false
 		}
 	}
@@ -164,6 +242,16 @@ func collectionReadyWithSchema(actual reconcile.ActualState, spec *ebpf.Collecti
 		}
 	}
 	return true
+}
+
+func programMatchesSpec(name string, program reconcile.ProgramState, expected *ebpf.ProgramSpec) bool {
+	if program.ID == 0 || expected == nil {
+		return false
+	}
+	if program.Name != "" && program.Name != name {
+		return false
+	}
+	return expected.Compatible(&ebpf.ProgramInfo{Tag: program.Tag}) == nil
 }
 
 func initializeControlMap(ctx context.Context, pinRoot string) error {

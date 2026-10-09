@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/cat-cc-Lcos/FNCache/internal/datapath"
+	"github.com/cat-cc-Lcos/FNCache/internal/discovery"
 	"github.com/cat-cc-Lcos/FNCache/internal/reconcile"
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/asm"
@@ -201,6 +202,153 @@ func TestCollectionEnsurerRepairsMissingControlPin(t *testing.T) {
 	delete(actual.Maps, "control_map")
 	if changed, err := ensurer.EnsureCollection(context.Background(), reconcile.DesiredState{Enabled: true}, actual); err != nil || !changed || !ensured || loaded.closeCalls != 0 {
 		t.Fatalf("partial collection was not repaired: changed=%v err=%v ensured=%v handle=%+v", changed, err, ensured, loaded)
+	}
+}
+
+func TestCollectionEnsurerRecoversPartialProgramPins(t *testing.T) {
+	elf := filepath.Join(t.TempDir(), "datapath.o")
+	if err := os.WriteFile(elf, []byte("elf"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	spec := testCollectionSpec()
+	handle := &fakeCollectionHandle{}
+	removed := make([]string, 0)
+	loaded := false
+	initialized := false
+	ensurer, err := newCollectionEnsurer(elf, filepath.Join(t.TempDir(), "bpf"), func(string) (collectionOps, error) {
+		return collectionOps{
+			loadCollection: func(io.ReaderAt, datapath.CollectionSchema) (*ebpf.CollectionSpec, error) {
+				return spec, nil
+			},
+			loadAndPin: func(*ebpf.CollectionSpec, datapath.CollectionSchema) (collectionHandle, error) {
+				loaded = true
+				return handle, nil
+			},
+			removeProgram: func(_ context.Context, name string, id uint32) error {
+				if id != 1 {
+					t.Fatalf("program %s was removed with ID %d, want 1", name, id)
+				}
+				removed = append(removed, name)
+				return nil
+			},
+		}, nil
+	}, func(context.Context, string) error {
+		initialized = true
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual := readyCollectionState(t, spec)
+	delete(actual.Programs, "tc_restore")
+	actual.Control = reconcile.ControlState{Verified: true}
+
+	changed, err := ensurer.EnsureCollection(context.Background(), reconcile.DesiredState{Enabled: true}, actual)
+	wantRemoved := []string{"tc_init_e", "tc_init_in", "tc_masq"}
+	if err != nil || !changed || !loaded || !initialized || handle.closeCalls != 1 || len(removed) != len(wantRemoved) {
+		t.Fatalf("partial program pins were not recovered: changed=%v err=%v loaded=%v initialized=%v removed=%v handle=%+v", changed, err, loaded, initialized, removed, handle)
+	}
+	for index, name := range wantRemoved {
+		if removed[index] != name {
+			t.Fatalf("removed program %d = %q, want %q", index, removed[index], name)
+		}
+	}
+}
+
+func TestCollectionEnsurerRefusesUnsafePartialProgramRecovery(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*reconcile.ActualState)
+	}{
+		{name: "attached", mutate: func(actual *reconcile.ActualState) {
+			actual.Attachments = []reconcile.AttachmentState{{Program: "tc_init_e", ProgramID: 1}}
+		}},
+		{name: "enabled", mutate: func(actual *reconcile.ActualState) {
+			actual.Control.Enabled = true
+		}},
+		{name: "TC conflict", mutate: func(actual *reconcile.ActualState) {
+			actual.Conflicts = []discovery.Conflict{{Kind: "tc-filter", Identity: "foreign"}}
+		}},
+		{name: "stale program", mutate: func(actual *reconcile.ActualState) {
+			program := actual.Programs["tc_init_e"]
+			program.Tag = "stale-program-tag"
+			actual.Programs["tc_init_e"] = program
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			elf := filepath.Join(t.TempDir(), "datapath.o")
+			if err := os.WriteFile(elf, []byte("elf"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			spec := testCollectionSpec()
+			removed := 0
+			loaded := false
+			ensurer, err := newCollectionEnsurer(elf, filepath.Join(t.TempDir(), "bpf"), func(string) (collectionOps, error) {
+				return collectionOps{
+					loadCollection: func(io.ReaderAt, datapath.CollectionSchema) (*ebpf.CollectionSpec, error) {
+						return spec, nil
+					},
+					loadAndPin: func(*ebpf.CollectionSpec, datapath.CollectionSchema) (collectionHandle, error) {
+						loaded = true
+						return &fakeCollectionHandle{}, nil
+					},
+					removeProgram: func(context.Context, string, uint32) error {
+						removed++
+						return nil
+					},
+				}, nil
+			}, func(context.Context, string) error { return nil })
+			if err != nil {
+				t.Fatal(err)
+			}
+			actual := readyCollectionState(t, spec)
+			delete(actual.Programs, "tc_restore")
+			actual.Control = reconcile.ControlState{Verified: true}
+			tt.mutate(&actual)
+
+			if changed, err := ensurer.EnsureCollection(context.Background(), reconcile.DesiredState{Enabled: true}, actual); err == nil || changed || loaded || removed != 0 {
+				t.Fatalf("unsafe partial recovery was not rejected: changed=%v err=%v loaded=%v removed=%d", changed, err, loaded, removed)
+			}
+		})
+	}
+}
+
+func TestCollectionEnsurerDoesNotRecoverProgramPinOrphan(t *testing.T) {
+	elf := filepath.Join(t.TempDir(), "datapath.o")
+	if err := os.WriteFile(elf, []byte("elf"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	spec := testCollectionSpec()
+	wantErr := errors.New("existing program pin")
+	loaded := false
+	removed := 0
+	ensurer, err := newCollectionEnsurer(elf, filepath.Join(t.TempDir(), "bpf"), func(string) (collectionOps, error) {
+		return collectionOps{
+			loadCollection: func(io.ReaderAt, datapath.CollectionSchema) (*ebpf.CollectionSpec, error) {
+				return spec, nil
+			},
+			loadAndPin: func(*ebpf.CollectionSpec, datapath.CollectionSchema) (collectionHandle, error) {
+				loaded = true
+				return nil, wantErr
+			},
+			removeProgram: func(context.Context, string, uint32) error {
+				removed++
+				return nil
+			},
+		}, nil
+	}, func(context.Context, string) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual := readyCollectionState(t, spec)
+	delete(actual.Programs, "tc_restore")
+	actual.Control = reconcile.ControlState{Verified: true}
+	actual.Orphans = []reconcile.OwnedObject{{Kind: "program-pin", Identity: "/sys/fs/bpf/oncache/v1/programs/foreign"}}
+
+	changed, err := ensurer.EnsureCollection(context.Background(), reconcile.DesiredState{Enabled: true}, actual)
+	if !errors.Is(err, wantErr) || changed || !loaded || removed != 0 {
+		t.Fatalf("program-pin orphan entered recovery: changed=%v err=%v loaded=%v removed=%d", changed, err, loaded, removed)
 	}
 }
 
