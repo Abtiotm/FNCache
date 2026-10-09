@@ -85,6 +85,8 @@ func NewObserver(sources Sources, input ObservationInput) (*Observer, error) {
 	if len(missing) != 0 {
 		return nil, fmt.Errorf("observation sources are required: %s", strings.Join(missing, ", "))
 	}
+	input.PreflightRequest.MarkerChain = input.MarkerRule.Chain
+	input.PreflightRequest.MarkerComment = input.MarkerRule.Comment
 	input.Pods = append([]resolver.PodSnapshot(nil), input.Pods...)
 	input.TCLinks = append([]resolver.LinkIdentity(nil), input.TCLinks...)
 	baseTCLinks := input.BaseTCLinks
