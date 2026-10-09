@@ -46,9 +46,9 @@ func validRouteOutput(output []byte) bool {
 	return json.Unmarshal(bytes.TrimSpace(output), &routes) == nil && len(routes) > 0
 }
 
-func hasReservedTOSConflict(output []byte) bool {
+func hasReservedTOSConflict(output []byte, markerChain, markerComment string) bool {
 	for _, line := range strings.Split(strings.ToLower(string(output)), "\n") {
-		if isOncacheMarkerRule(line) {
+		if isMarkerRule(line, markerChain, markerComment) {
 			continue
 		}
 		if !strings.Contains(line, "set-tos") && !strings.Contains(line, "set-dscp") && !strings.Contains(line, "set-xmark") {
@@ -61,12 +61,25 @@ func hasReservedTOSConflict(output []byte) bool {
 	return false
 }
 
+func isMarkerRule(line, markerChain, markerComment string) bool {
+	normalized := strings.Join(strings.Fields(line), " ")
+	if markerChain == "" || markerComment == "" {
+		return isOncacheMarkerRule(normalized)
+	}
+	return strings.HasPrefix(normalized, "-a "+strings.ToLower(markerChain)+" ") &&
+		strings.Contains(normalized, "-m comment --comment \""+strings.ToLower(markerComment)+"\"") &&
+		strings.Contains(normalized, "-m conntrack --ctstate established") &&
+		strings.Contains(normalized, "-m tos --tos 0x04/0x04") &&
+		strings.Contains(normalized, "-j tos --set-tos 0x08/0x08")
+}
+
 func isOncacheMarkerRule(line string) bool {
 	normalized := strings.Join(strings.Fields(line), " ")
 	return strings.HasPrefix(normalized, "-a oncache ") &&
 		strings.Contains(normalized, "-m comment --comment \"oncache:") &&
-		strings.Contains(normalized, "--tos 0x04/0x04") &&
-		strings.Contains(normalized, "--set-tos 0x08/0x08")
+		strings.Contains(normalized, "-m conntrack --ctstate established") &&
+		strings.Contains(normalized, "-m tos --tos 0x04/0x04") &&
+		strings.Contains(normalized, "-j tos --set-tos 0x08/0x08")
 }
 
 func hasFixedTCConflict(output []byte) bool {

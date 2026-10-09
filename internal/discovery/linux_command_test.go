@@ -19,7 +19,7 @@ func TestLinuxCommandParsers(t *testing.T) {
 }
 
 func TestLinuxConflictParsers(t *testing.T) {
-	if !hasReservedTOSConflict([]byte("-A ONCACHE -m tos --set-tos 0x08")) {
+	if !hasReservedTOSConflict([]byte("-A ONCACHE -m tos --set-tos 0x08"), "", "") {
 		t.Fatal("TOS conflict was not detected")
 	}
 	if !hasFixedTCConflict([]byte(`[{"pref":1000,"handle":256}]`)) {
@@ -31,10 +31,21 @@ func TestLinuxConflictParsers(t *testing.T) {
 	if hasPinnedObject([]byte(`{"pinned":"/sys/fs/bpf/oncache/v1-other/maps/external_map"}`), "/sys/fs/bpf/oncache/v1") {
 		t.Fatal("sibling pin path was treated as a conflict")
 	}
-	if hasReservedTOSConflict([]byte("-A ONCACHE -j ACCEPT")) || hasFixedTCConflict([]byte("[]")) {
+	if hasReservedTOSConflict([]byte("-A ONCACHE -j ACCEPT"), "", "") || hasFixedTCConflict([]byte("[]")) {
 		t.Fatal("false conflict detected")
 	}
-	if hasReservedTOSConflict([]byte(`-A ONCACHE -m comment --comment "oncache:m2-local" -m conntrack --ctstate ESTABLISHED -m tos --tos 0x04/0x04 -j TOS --set-tos 0x08/0x08`)) {
+	if hasReservedTOSConflict([]byte(`-A ONCACHE -m comment --comment "oncache:m2-local" -m conntrack --ctstate ESTABLISHED -m tos --tos 0x04/0x04 -j TOS --set-tos 0x08/0x08`), "", "") {
 		t.Fatal("canonical ONCache marker was treated as a TOS conflict")
+	}
+	custom := []byte(`-A FNCACHE -m comment --comment "fncache:marker" -m conntrack --ctstate ESTABLISHED -m tos --tos 0x04/0x04 -j TOS --set-tos 0x08/0x08`)
+	if hasReservedTOSConflict(custom, "FNCACHE", "fncache:marker") {
+		t.Fatal("configured custom marker was treated as a TOS conflict")
+	}
+	if !hasReservedTOSConflict(custom, "OTHER", "other") {
+		t.Fatal("custom marker with a different configured identity was not treated as a TOS conflict")
+	}
+	drifted := []byte(`-A FNCACHE -m comment --comment "fncache:marker" -m conntrack --ctstate ESTABLISHED -m tos --tos 0x04/0x04 -j TOS --set-tos 0x01/0x01`)
+	if !hasReservedTOSConflict(drifted, "FNCACHE", "fncache:marker") {
+		t.Fatal("drifted custom marker was not treated as a TOS conflict")
 	}
 }

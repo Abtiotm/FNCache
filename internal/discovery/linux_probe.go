@@ -54,7 +54,7 @@ func (p *LinuxProbe) Probe(ctx context.Context, req PreflightRequest) (ProbeSnap
 	checks := []ProbeCheck{bpffs, btf, cri}
 	checks = append(checks, p.checkHelpers(ctx)...)
 	tc := p.checkTC(ctx)
-	checks = append(checks, tc, p.checkIPv4Forward(), p.checkRoutes(ctx), p.checkTOS(ctx), p.checkExternalConflicts(ctx, req))
+	checks = append(checks, tc, p.checkIPv4Forward(), p.checkRoutes(ctx), p.checkTOS(ctx, req), p.checkExternalConflicts(ctx, req))
 	return ProbeSnapshot{
 		KernelRelease: strings.TrimSpace(string(release)), Architecture: runtime.GOARCH,
 		HasBTF: btf.Supported, BPFFSMounted: bpffs.Supported, TCSupported: tc.Supported,
@@ -144,14 +144,14 @@ func (p *LinuxProbe) checkRoutes(ctx context.Context) ProbeCheck {
 	return ProbeCheck{Name: "ipv4/routes", ProbeResult: result}
 }
 
-func (p *LinuxProbe) checkTOS(ctx context.Context) ProbeCheck {
+func (p *LinuxProbe) checkTOS(ctx context.Context, req PreflightRequest) ProbeCheck {
 	result := ProbeResult{Required: true, ReasonCode: "IPTABLES_NFT_UNAVAILABLE"}
 	output, err := p.runCommand(ctx, "iptables-nft", "-t", "mangle", "-S")
 	if err != nil {
 		result.Detail = string(output)
 		return ProbeCheck{Name: "tos", ProbeResult: result}
 	}
-	result.Supported = !hasReservedTOSConflict(output)
+	result.Supported = !hasReservedTOSConflict(output, req.MarkerChain, req.MarkerComment)
 	if result.Supported {
 		result.ReasonCode = ""
 	} else {
@@ -183,7 +183,7 @@ func (p *LinuxProbe) checkExternalConflicts(ctx context.Context, req PreflightRe
 		result.Detail = string(netfilter)
 		return ProbeCheck{Name: "external/conflicts", ProbeResult: result}
 	}
-	if hasFixedTCConflict(tc) || hasPinnedObject(programs, req.PinRoot) || hasPinnedObject(maps, req.PinRoot) || hasReservedTOSConflict(netfilter) {
+	if hasFixedTCConflict(tc) || hasPinnedObject(programs, req.PinRoot) || hasPinnedObject(maps, req.PinRoot) || hasReservedTOSConflict(netfilter, req.MarkerChain, req.MarkerComment) {
 		result.ReasonCode, result.Retryable = "EXTERNAL_OBJECT_CONFLICT", false
 		result.Detail = "an external object uses an ONCache identity or reserved TOS mask"
 		return ProbeCheck{Name: "external/conflicts", ProbeResult: result}

@@ -64,6 +64,37 @@ func TestLinuxProbeReportsMissingCapabilities(t *testing.T) {
 	}
 }
 
+func TestLinuxProbeAcceptsConfiguredCustomMarker(t *testing.T) {
+	runner := func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if name == "iptables-nft" {
+			return []byte(`-A FNCACHE -m comment --comment "fncache:marker" -m conntrack --ctstate ESTABLISHED -m tos --tos 0x04/0x04 -j TOS --set-tos 0x08/0x08`), nil
+		}
+		return fakeCommandRunner(ctx, name, args...)
+	}
+	probe, request, cleanup := probeFixtureWithRunner(t, true, true, true, runner)
+	defer cleanup()
+	request.MarkerChain = "FNCACHE"
+	request.MarkerComment = "fncache:marker"
+
+	snapshot, err := probe.Probe(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := map[string]bool{}
+	for _, check := range snapshot.Checks {
+		if check.Name != "tos" && check.Name != "external/conflicts" {
+			continue
+		}
+		found[check.Name] = true
+		if !check.Supported {
+			t.Fatalf("configured custom marker was reported as a conflict: %+v", check)
+		}
+	}
+	if !found["tos"] || !found["external/conflicts"] {
+		t.Fatalf("custom marker checks were not both reported: %v", found)
+	}
+}
+
 func TestLinuxProbeDetectsPinnedBPFConflict(t *testing.T) {
 	var progArgs, mapArgs []string
 	runner := func(ctx context.Context, name string, args ...string) ([]byte, error) {

@@ -14,13 +14,15 @@ import (
 )
 
 type fakePreflight struct {
-	report discovery.CapabilityReport
-	err    error
-	calls  int
+	report  discovery.CapabilityReport
+	err     error
+	calls   int
+	request discovery.PreflightRequest
 }
 
-func (f *fakePreflight) Check(context.Context, discovery.PreflightRequest) (discovery.CapabilityReport, error) {
+func (f *fakePreflight) Check(_ context.Context, request discovery.PreflightRequest) (discovery.CapabilityReport, error) {
 	f.calls++
+	f.request = request
 	return f.report, f.err
 }
 
@@ -108,6 +110,9 @@ func TestObserverDiscoverBuildsDesiredState(t *testing.T) {
 	}
 	if !reflect.DeepEqual(endpoints.pods, input.Pods) {
 		t.Fatalf("unexpected endpoint inputs: got=%+v want=%+v", endpoints.pods, input.Pods)
+	}
+	if preflight.request.MarkerChain != input.MarkerRule.Chain || preflight.request.MarkerComment != input.MarkerRule.Comment {
+		t.Fatalf("marker identity was not passed to preflight: request=%+v marker=%+v", preflight.request, input.MarkerRule)
 	}
 }
 
