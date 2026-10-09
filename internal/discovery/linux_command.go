@@ -47,14 +47,16 @@ func validRouteOutput(output []byte) bool {
 }
 
 func hasReservedTOSConflict(output []byte, markerChain, markerComment string) bool {
-	for _, line := range strings.Split(strings.ToLower(string(output)), "\n") {
+	for _, raw := range strings.Split(string(output), "\n") {
+		line := strings.Join(strings.Fields(raw), " ")
 		if isMarkerRule(line, markerChain, markerComment) {
 			continue
 		}
-		if !strings.Contains(line, "set-tos") && !strings.Contains(line, "set-dscp") && !strings.Contains(line, "set-xmark") {
+		normalized := strings.ToLower(line)
+		if !strings.Contains(normalized, "set-tos") && !strings.Contains(normalized, "set-dscp") && !strings.Contains(normalized, "set-xmark") {
 			continue
 		}
-		if strings.Contains(line, "0x04") || strings.Contains(line, "0x08") {
+		if strings.Contains(normalized, "0x04") || strings.Contains(normalized, "0x08") {
 			return true
 		}
 	}
@@ -62,24 +64,32 @@ func hasReservedTOSConflict(output []byte, markerChain, markerComment string) bo
 }
 
 func isMarkerRule(line, markerChain, markerComment string) bool {
-	normalized := strings.Join(strings.Fields(line), " ")
 	if markerChain == "" || markerComment == "" {
-		return isOncacheMarkerRule(normalized)
+		return isOncacheMarkerRule(line)
 	}
-	return strings.HasPrefix(normalized, "-a "+strings.ToLower(markerChain)+" ") &&
-		strings.Contains(normalized, "-m comment --comment \""+strings.ToLower(markerComment)+"\"") &&
-		strings.Contains(normalized, "-m conntrack --ctstate established") &&
-		strings.Contains(normalized, "-m tos --tos 0x04/0x04") &&
-		strings.Contains(normalized, "-j tos --set-tos 0x08/0x08")
+	fields := strings.Fields(line)
+	return len(fields) == 18 && fields[1] == markerChain && strings.Trim(fields[5], "\"") == markerComment && markerRuleFieldsMatch(fields)
 }
 
 func isOncacheMarkerRule(line string) bool {
-	normalized := strings.Join(strings.Fields(line), " ")
-	return strings.HasPrefix(normalized, "-a oncache ") &&
-		strings.Contains(normalized, "-m comment --comment \"oncache:") &&
-		strings.Contains(normalized, "-m conntrack --ctstate established") &&
-		strings.Contains(normalized, "-m tos --tos 0x04/0x04") &&
-		strings.Contains(normalized, "-j tos --set-tos 0x08/0x08")
+	fields := strings.Fields(line)
+	return len(fields) == 18 && fields[1] == "ONCACHE" && strings.HasPrefix(strings.Trim(fields[5], "\""), "oncache:") && markerRuleFieldsMatch(fields)
+}
+
+func markerRuleFieldsMatch(fields []string) bool {
+	expected := []string{"-A", "", "-m", "comment", "--comment", "", "-m", "conntrack", "--ctstate", "ESTABLISHED", "-m", "tos", "--tos", "0x04/0x04", "-j", "TOS", "--set-tos", "0x08/0x08"}
+	if len(fields) != len(expected) {
+		return false
+	}
+	for index, want := range expected {
+		if index == 1 || index == 5 {
+			continue
+		}
+		if !strings.EqualFold(fields[index], want) {
+			return false
+		}
+	}
+	return true
 }
 
 func hasFixedTCConflict(output []byte) bool {

@@ -44,6 +44,18 @@ func TestLinuxConflictParsers(t *testing.T) {
 	if !hasReservedTOSConflict(custom, "OTHER", "other") {
 		t.Fatal("custom marker with a different configured identity was not treated as a TOS conflict")
 	}
+	caseVariantChain := []byte(`-A fncache -m comment --comment "fncache:marker" -m conntrack --ctstate ESTABLISHED -m tos --tos 0x04/0x04 -j TOS --set-tos 0x08/0x08`)
+	if !hasReservedTOSConflict(caseVariantChain, "FNCACHE", "fncache:marker") {
+		t.Fatal("marker on a case-variant chain was not treated as a TOS conflict")
+	}
+	caseVariantComment := []byte(`-A FNCACHE -m comment --comment "fncache:Marker" -m conntrack --ctstate ESTABLISHED -m tos --tos 0x04/0x04 -j TOS --set-tos 0x08/0x08`)
+	if !hasReservedTOSConflict(caseVariantComment, "FNCACHE", "fncache:marker") {
+		t.Fatal("marker with a case-variant comment was not treated as a TOS conflict")
+	}
+	related := []byte(`-A FNCACHE -m comment --comment "fncache:marker" -m conntrack --ctstate ESTABLISHED,RELATED -m tos --tos 0x04/0x04 -j TOS --set-tos 0x08/0x08`)
+	if !hasReservedTOSConflict(related, "FNCACHE", "fncache:marker") {
+		t.Fatal("marker with RELATED state was not treated as a TOS conflict")
+	}
 	drifted := []byte(`-A FNCACHE -m comment --comment "fncache:marker" -m conntrack --ctstate ESTABLISHED -m tos --tos 0x04/0x04 -j TOS --set-tos 0x01/0x01`)
 	if !hasReservedTOSConflict(drifted, "FNCACHE", "fncache:marker") {
 		t.Fatal("drifted custom marker was not treated as a TOS conflict")

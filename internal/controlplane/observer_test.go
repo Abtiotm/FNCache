@@ -84,6 +84,7 @@ func TestObserverDiscoverBuildsDesiredState(t *testing.T) {
 		Skipped:   map[string]error{"pod-pending": resolver.ErrEndpointNotReady, "pod-unsupported": resolver.ErrUnsupported},
 	}}
 	input := testInput()
+	input.MarkerRule = flannel.MarkerRuleSpec{Chain: "FNCACHE", Comment: "fncache:custom"}
 	observer, err := NewObserver(testSources(preflight, flannelSource, endpoints), input)
 	if err != nil {
 		t.Fatal(err)
