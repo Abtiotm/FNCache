@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/cat-cc-Lcos/FNCache/internal/datapath"
+	"github.com/cat-cc-Lcos/FNCache/internal/discovery"
 	"github.com/cat-cc-Lcos/FNCache/internal/reconcile"
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/asm"
@@ -265,6 +266,9 @@ func TestCollectionEnsurerRefusesUnsafePartialProgramRecovery(t *testing.T) {
 		{name: "enabled", mutate: func(actual *reconcile.ActualState) {
 			actual.Control.Enabled = true
 		}},
+		{name: "TC conflict", mutate: func(actual *reconcile.ActualState) {
+			actual.Conflicts = []discovery.Conflict{{Kind: "tc-filter", Identity: "foreign"}}
+		}},
 		{name: "stale program", mutate: func(actual *reconcile.ActualState) {
 			program := actual.Programs["tc_init_e"]
 			program.Tag = "stale-program-tag"
@@ -307,6 +311,44 @@ func TestCollectionEnsurerRefusesUnsafePartialProgramRecovery(t *testing.T) {
 				t.Fatalf("unsafe partial recovery was not rejected: changed=%v err=%v loaded=%v removed=%d", changed, err, loaded, removed)
 			}
 		})
+	}
+}
+
+func TestCollectionEnsurerDoesNotRecoverProgramPinOrphan(t *testing.T) {
+	elf := filepath.Join(t.TempDir(), "datapath.o")
+	if err := os.WriteFile(elf, []byte("elf"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	spec := testCollectionSpec()
+	wantErr := errors.New("existing program pin")
+	loaded := false
+	removed := 0
+	ensurer, err := newCollectionEnsurer(elf, filepath.Join(t.TempDir(), "bpf"), func(string) (collectionOps, error) {
+		return collectionOps{
+			loadCollection: func(io.ReaderAt, datapath.CollectionSchema) (*ebpf.CollectionSpec, error) {
+				return spec, nil
+			},
+			loadAndPin: func(*ebpf.CollectionSpec, datapath.CollectionSchema) (collectionHandle, error) {
+				loaded = true
+				return nil, wantErr
+			},
+			removeProgram: func(context.Context, string, uint32) error {
+				removed++
+				return nil
+			},
+		}, nil
+	}, func(context.Context, string) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual := readyCollectionState(t, spec)
+	delete(actual.Programs, "tc_restore")
+	actual.Control = reconcile.ControlState{Verified: true}
+	actual.Orphans = []reconcile.OwnedObject{{Kind: "program-pin", Identity: "/sys/fs/bpf/oncache/v1/programs/foreign"}}
+
+	changed, err := ensurer.EnsureCollection(context.Background(), reconcile.DesiredState{Enabled: true}, actual)
+	if !errors.Is(err, wantErr) || changed || !loaded || removed != 0 {
+		t.Fatalf("program-pin orphan entered recovery: changed=%v err=%v loaded=%v removed=%d", changed, err, loaded, removed)
 	}
 }
 
