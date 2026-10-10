@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cat-cc-Lcos/FNCache/internal/logging"
+	"github.com/cat-cc-Lcos/FNCache/internal/observability"
 	"github.com/cat-cc-Lcos/FNCache/internal/reconcile"
 )
 
@@ -104,7 +104,7 @@ func TestWorkerUsesExecutionBarrier(t *testing.T) {
 func TestWorkerLogsClassifiedFailures(t *testing.T) {
 	q, _ := New(Config{BaseDelay: time.Millisecond, MaxDelay: 10 * time.Millisecond})
 	var output bytes.Buffer
-	logger, err := logging.New(logging.Config{Level: "debug", Component: "queue", Writer: &output, RateInterval: time.Hour})
+	logger, err := observability.New(observability.LoggingConfig{Level: "debug", Component: "queue", Writer: &output, RateInterval: time.Hour})
 	if err != nil {
 		t.Fatal(err)
 	}
