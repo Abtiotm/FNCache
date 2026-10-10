@@ -134,3 +134,19 @@ func TestWorkerLogsClassifiedFailures(t *testing.T) {
 		t.Fatalf("unexpected worker log: %#v", record)
 	}
 }
+
+func TestNewWorkerWithBarrierAndLoggerReplacesTypedNilLogger(t *testing.T) {
+	q, err := New(Config{BaseDelay: time.Millisecond, MaxDelay: 10 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var typedNilLogger *observability.Logger
+	worker, err := NewWorkerWithBarrierAndLogger(q, func(context.Context, reconcile.ReconcileKey) error { return nil }, nil, typedNilLogger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger, ok := worker.logger.(*observability.Logger)
+	if !ok || logger == nil {
+		t.Fatalf("typed nil logger was not replaced: %#v", worker.logger)
+	}
+}

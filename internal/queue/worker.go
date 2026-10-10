@@ -38,6 +38,9 @@ func NewWorkerWithBarrierAndLogger(queue *Queue, handler Handler, barrier Execut
 	if logger == nil {
 		logger = observability.NewDefault("queue")
 	}
+	if typedLogger, ok := logger.(*observability.Logger); ok && typedLogger == nil {
+		logger = observability.NewDefault("queue")
+	}
 	return &Worker{queue: queue, handler: handler, barrier: barrier, logger: logger}, nil
 }
 
