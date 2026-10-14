@@ -300,6 +300,12 @@ func TestDynamicRuntimeSkipsDatapathWhenFeatureDisabled(t *testing.T) {
 		t.Fatal("disabled runtime unexpectedly created datapath components")
 	}
 
+	select {
+	case err := <-done:
+		t.Fatalf("disabled runtime returned before context cancellation: %v", err)
+	default:
+	}
+
 	cancel()
 	select {
 	case err := <-done:
